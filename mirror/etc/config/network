@@ -1,0 +1,43 @@
+
+config interface 'loopback'
+	option device 'lo'
+	option proto 'static'
+	list ipaddr '127.0.0.1/8'
+
+config globals 'globals'
+	option dhcp_default_duid 'DUID'
+	option ula_prefix 'fdXX:XXXX:XXXX::/48'
+	option packet_steering '1'
+
+config device
+	option name 'br-lan'
+	option type 'bridge'
+	list ports 'lan2'
+	list ports 'lan3'
+	list ports 'lan4'
+
+config interface 'lan'
+	option device 'br-lan'
+	option proto 'static'
+	option ip6assign '60'
+	list ipaddr 'LAN_IP/24'
+	option multipath 'off'
+
+config device
+	option name 'wan'
+	option macaddr 'XX:XX:XX:XX:XX:XX'
+
+config interface 'wan'
+	option device 'wan'
+	option proto 'dhcp'
+	option macaddr 'XX:XX:XX:XX:XX:XX'
+
+config interface 'wan6'
+	option device 'wan'
+	option proto 'dhcpv6'
+	option disabled '1'
+
+config interface 'vlesstun'
+	option proto 'none'
+	option device 'tun0'
+

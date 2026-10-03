@@ -1,0 +1,253 @@
+#!/usr/bin/env python3
+import json, sys, urllib.parse, urllib.request, urllib.error
+
+API = "http://127.0.0.1:9090"
+TEST_URL = "https://www.gstatic.com/generate_204"
+SKIP = {"URLTest", "Selector", "Fallback", "LoadBalance", "Direct", "Reject", "Pass", "Block", "Dns", "Compatible"}
+
+try:
+    SECRET = open("/etc/sing-box/.clash-secret").read().strip()
+except Exception:
+    SECRET = ""
+
+def call(path, data=None, method=None, timeout=10):
+    body = json.dumps(data).encode() if data is not None else None
+    req = urllib.request.Request(API + path, data=body, method=method)
+    if SECRET:
+        req.add_header("Authorization", "Bearer " + SECRET)
+    if body:
+        req.add_header("Content-Type", "application/json")
+    raw = urllib.request.urlopen(req, timeout=timeout).read()
+    return json.loads(raw.decode()) if raw else {}
+
+def proxies():
+    return call("/proxies").get("proxies", {})
+
+def nodes(p):
+    out = []
+    for name, info in p.items():
+        if info.get("type") in SKIP:
+            continue
+        h = info.get("history") or []
+        out.append((name, h[-1].get("delay", 0) if h else 0, h[-1].get("time", "") if h else ""))
+    return out
+
+def selector_group(p):
+    return "proxy" if "proxy" in p else "auto"
+
+def show():
+    p = proxies()
+    ns = nodes(p)
+    stamps = [t for _, _, t in ns if t]
+    last = max(stamps).split('.')[0].replace('T', ' ') if stamps else "нет данных"
+    print("=" * 45)
+    print(f" Последний опрос: {last}")
+    for g in ("proxy", "auto", "gemini-select", "gemini-auto"):
+        if g in p:
+            print(f" {g:<14} → {p[g].get('now', '?')}")
+    if "proxy" not in p:
+        print(" (селектора proxy нет — ручное переключение недоступно)")
+    print("=" * 45)
+    alive = sorted([n for n in ns if n[1] > 0], key=lambda x: x[1])
+    dead = [n for n in ns if n[1] == 0]
+    for i, (name, delay, _) in enumerate(alive, 1):
+        print(f" {i:2d}. {delay:4d} ms  {name}")
+    for name, _, _ in dead:
+        print(f"  —   ---- ms  {name}")
+    print("=" * 45)
+    if "proxy" in p:
+        print(" vpn use N — включить ноду №N | vpn auto — автовыбор | vpn test — перепроверить все")
+        print(" vpn gemini — ноды для Gemini | vpn site сайт — куда идёт сайт | vpn help — все команды")
+    else:
+        print(" vpn test  (переключение недоступно без селектора proxy)")
+
+def test():
+    p = proxies()
+    q = urllib.parse.urlencode({"url": TEST_URL, "timeout": 5000})
+    for name, _, _ in nodes(p):
+        path = "/proxies/" + urllib.parse.quote(name, safe="") + "/delay?" + q
+        try:
+            r = call(path, timeout=12)
+            print(f" {r.get('delay', 0):4d} ms  {name}")
+        except Exception:
+            print(f"  ---- ms  {name}")
+
+def switch(target):
+    p = proxies()
+    group = selector_group(p)
+    if group != "proxy":
+        print("Селектора proxy нет в конфиге — ручное переключение недоступно.")
+        print("Сейчас маршрутизацией управляет 'auto' (urltest) сам.")
+        return
+    if target != "auto":
+        alive = sorted([n for n in nodes(p) if n[1] > 0], key=lambda x: x[1])
+        try:
+            target = alive[int(target) - 1][0]
+        except (ValueError, IndexError):
+            print("Неверный номер. Сначала: vpn nodes")
+            return
+    call(f"/proxies/{group}", data={"name": target}, method="PUT")
+    print(f"{group} → {target}")
+
+# --- Gemini: своя группа gemini-select (автовыбор gemini-auto или нода P1 вручную; через P2 Gemini не работает) ---
+def gemini_nodes(p):
+    members = set(p.get("gemini-select", {}).get("all", []))
+    return [n for n in nodes(p) if n[0] in members]
+
+def show_gemini():
+    p = proxies()
+    if "gemini-select" not in p:
+        print("Группы gemini-select нет в конфиге.")
+        return
+    now = p["gemini-select"].get("now", "?")
+    print("=" * 45)
+    if now == "gemini-auto":
+        print(f" Gemini: автовыбор → {p.get('gemini-auto', {}).get('now', '?')}")
+    else:
+        print(f" Gemini: выбрана вручную → {now}")
+    print("=" * 45)
+    ns = gemini_nodes(p)
+    alive = sorted([n for n in ns if n[1] > 0], key=lambda x: x[1])
+    for i, (name, delay, _) in enumerate(alive, 1):
+        print(f" {i:2d}. {delay:4d} ms  {name}")
+    for name, _, _ in [n for n in ns if n[1] == 0]:
+        print(f"  —   ---- ms  {name}")
+    print("=" * 45)
+    print(" vpn gemini N — включить ноду №N для Gemini | vpn gemini auto — автовыбор")
+
+def switch_gemini(target):
+    p = proxies()
+    if "gemini-select" not in p:
+        print("Группы gemini-select нет в конфиге.")
+        return
+    if target == "auto":
+        name = "gemini-auto"
+    else:
+        alive = sorted([n for n in gemini_nodes(p) if n[1] > 0], key=lambda x: x[1])
+        try:
+            name = alive[int(target) - 1][0]
+        except (ValueError, IndexError):
+            print("Неверный номер. Сначала: vpn gemini")
+            return
+    call("/proxies/gemini-select", data={"name": name}, method="PUT")
+    print(f"Gemini → {'автовыбор' if name == 'gemini-auto' else name}")
+
+# --- Ручные списки маршрутизации (sing-box подхватывает правку файла без перезапуска) ---
+import ipaddress, os, subprocess
+
+LISTS = {"direct": "/etc/sing-box/rule-set/my-direct",
+         "proxy": "/etc/sing-box/rule-set/my-proxy"}
+LIST_NAMES = {"direct": "напрямую", "proxy": "через VPN"}
+# Домены и IP — в разных файлах: доменные списки используются ещё и в DNS-правилах,
+# а IP внутри DNS-правила превращает его в фильтр по ответу.
+SUFFIX = {"domain_suffix": ".json", "ip_cidr": "-ip.json"}
+PLACEHOLDER = {"domain_suffix": "placeholder.invalid", "ip_cidr": "192.0.2.255/32"}
+
+def normalize(value):
+    value = value.strip().lower()
+    if "://" in value:
+        value = urllib.parse.urlparse(value).hostname or value
+    try:
+        return "ip_cidr", str(ipaddress.ip_network(value, strict=False))
+    except ValueError:
+        return "domain_suffix", value.lstrip("*.").split("/")[0]
+
+def list_path(kind, key):
+    return LISTS[kind] + SUFFIX[key]
+
+def list_items(kind, key):
+    data = json.load(open(list_path(kind, key), encoding="utf-8"))
+    return [x for r in data["rules"] for x in r.get(key, []) if x != PLACEHOLDER[key]]
+
+def save_items(kind, key, items):
+    data = {"version": 3, "rules": [{key: sorted(set(items)) or [PLACEHOLDER[key]]}]}
+    path = list_path(kind, key)
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    os.replace(path + ".tmp", path)
+
+def remove_from(kind, key, value):
+    items = list_items(kind, key)
+    if value not in items:
+        return False
+    save_items(kind, key, [x for x in items if x != value])
+    return True
+
+def add_to(kind, raw):
+    key, value = normalize(raw)
+    other = "proxy" if kind == "direct" else "direct"
+    if remove_from(other, key, value):
+        print(f"{value}: убран из списка «{LIST_NAMES[other]}»")
+    items = list_items(kind, key)
+    if value in items:
+        print(f"{value} уже в списке «{LIST_NAMES[kind]}»")
+        return
+    save_items(kind, key, items + [value])
+    print(f"{value} → {LIST_NAMES[kind]}. Применится через пару секунд, без перезапуска.")
+
+def delete(raw):
+    key, value = normalize(raw)
+    hit = [k for k in LISTS if remove_from(k, key, value)]
+    print(f"{value}: убран из «{LIST_NAMES[hit[0]]}»" if hit else f"{value} нет ни в одном списке")
+
+def show_lists():
+    for kind in LISTS:
+        print(f"=== {LIST_NAMES[kind]} ({LISTS[kind]}.json, {LISTS[kind]}-ip.json)")
+        found = False
+        for key in SUFFIX:
+            items = list_items(kind, key)
+            if items:
+                print("  " + ", ".join(items))
+                found = True
+        if not found:
+            print("  (пусто)")
+
+def check_route(hosts):
+    subprocess.run(["python3", "/usr/bin/sb-route-test"] + hosts)
+
+EVENTS = "/root/events.log"
+
+def show_events(n):
+    # Постоянный журнал автоматики (переживает перезагрузку): сторожа, перезапуски, откаты.
+    try:
+        lines = open(EVENTS, encoding="utf-8").read().splitlines()
+    except FileNotFoundError:
+        lines = []
+    print("\n".join(lines[-n:]) if lines else "Событий пока нет — автоматике не приходилось вмешиваться.")
+
+try:
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "show"
+    if cmd == "test":
+        test()
+    elif cmd == "auto":
+        switch("auto")
+    elif cmd == "use" and len(sys.argv) > 2:
+        switch(sys.argv[2])
+    elif cmd == "gemini":
+        if len(sys.argv) > 2:
+            switch_gemini(sys.argv[2])
+        else:
+            show_gemini()
+    elif cmd == "add-direct" and len(sys.argv) > 2:
+        for v in sys.argv[2:]:
+            add_to("direct", v)
+    elif cmd == "add-proxy" and len(sys.argv) > 2:
+        for v in sys.argv[2:]:
+            add_to("proxy", v)
+    elif cmd == "del" and len(sys.argv) > 2:
+        for v in sys.argv[2:]:
+            delete(v)
+    elif cmd == "lists":
+        show_lists()
+    elif cmd == "route" and len(sys.argv) > 2:
+        check_route(sys.argv[2:])
+    elif cmd == "events":
+        show_events(int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else 30)
+    else:
+        show()
+except urllib.error.HTTPError as e:
+    print(f"API вернул {e.code}." + (" Проверь secret в /etc/sing-box/.clash-secret." if e.code == 401 else ""))
+    exit(1)
+except Exception as e:
+    print(f"Нет связи с API sing-box на {API}: {e}")
+    exit(1)

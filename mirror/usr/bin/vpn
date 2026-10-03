@@ -1,0 +1,87 @@
+#!/bin/sh
+# Одна короткая команда для всего, что нужно руками. Обёртка над sb-ping, sb-restart.sh,
+# apply-vless.sh, mem и проверками из /usr/lib/sb-common.sh. Справка: vpn help
+. /usr/lib/sb-common.sh
+
+ok() { if "$@"; then printf 'OK'; else printf 'НЕТ'; fi; }
+
+status() {
+    local trace loc node gem gsel up rss ts
+    echo "=== Состояние ==="
+    printf ' Интернет провайдера   %s\n' "$(ok direct_ok)"
+    trace=$(curl -s -m 8 https://1.1.1.1/cdn-cgi/trace 2>/dev/null)
+    loc=$(echo "$trace" | sed -n 's/^loc=//p')
+    node=$(sb_api /proxies/auto | jsonfilter -e '@.now' 2>/dev/null)
+    gem=$(sb_api /proxies/gemini-auto | jsonfilter -e '@.now' 2>/dev/null)
+    if [ -n "$loc" ] && [ "$loc" != "RU" ]; then
+        printf ' VPN                   OK — выход в %s через %s\n' "$loc" "${node:-?}"
+    else
+        printf ' VPN                   НЕ РАБОТАЕТ (выход: %s)\n' "${loc:-нет ответа}"
+    fi
+    [ "$(sb_api /proxies/proxy | jsonfilter -e '@.now' 2>/dev/null)" = "auto" ] \
+        || echo "                       (нода выбрана вручную — вернуть: vpn auto)"
+    gsel=$(sb_api /proxies/gemini-select | jsonfilter -e '@.now' 2>/dev/null)
+    if [ "$gsel" = "gemini-auto" ]; then
+        printf ' Gemini                через %s\n' "${gem:-?}"
+    else
+        printf ' Gemini                через %s (выбрана вручную — вернуть: vpn gemini auto)\n' "${gsel:-?}"
+    fi
+    printf ' Маршрутизация         %s\n' "$(ok routing_ok)"
+    if pidof sing-box >/dev/null; then
+        up=$(sb_uptime)
+        # RssAnon — настоящая память; RssFile — код программы, ядро освобождает его само.
+        rss=$(awk '/RssAnon/{print int($2/1024)}' "/proc/$(pidof sing-box | cut -d' ' -f1)/status")
+        printf ' sing-box              работает %d ч %d мин, память %s MB\n' $((up / 3600)) $((up % 3600 / 60)) "$rss"
+    else
+        echo " sing-box              НЕ ЗАПУЩЕН (сторож поднимет в течение минуты; сразу: vpn restart)"
+    fi
+    ts=$(curl -s -m 5 --unix-socket /var/run/tailscale/tailscaled.sock \
+        http://local-tailscaled.sock/localapi/v0/status 2>/dev/null | jsonfilter -e '@.BackendState' 2>/dev/null)
+    printf ' Tailscale             %s\n' "${ts:-не отвечает}"
+    printf ' Свободная память      %s MB\n' "$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)"
+    echo "=== Последние события (все: vpn log) ==="
+    tail -n 5 "$EVENTS" 2>/dev/null || echo " событий нет"
+}
+
+help() {
+    cat <<'EOF'
+vpn                  — состояние: интернет, VPN (страна выхода, нода), sing-box, Tailscale, события
+vpn nodes            — список нод с задержками       vpn test      — перепроверить все ноды
+vpn use N            — включить ноду №N из списка    vpn auto      — вернуть автовыбор
+vpn gemini           — ноды для Gemini (только P1)   vpn gemini N  — включить №N   vpn gemini auto — автовыбор
+vpn site сайт        — куда идёт сайт (напрямую / VPN) и по какому правилу
+vpn direct сайт      — всегда напрямую    vpn proxy сайт — всегда через VPN    vpn del сайт — убрать
+vpn lists            — что в списках direct/proxy
+vpn update           — обновить ноды из подписок (перезапуск только если они изменились)
+vpn restart          — безопасно перезапустить sing-box (~6 с без интернета)
+vpn log [N]          — что делала автоматика (журнал переживает перезагрузку)
+vpn speed            — замер скорости через VPN и напрямую (~1 мин)
+vpn mem              — память и самые прожорливые процессы
+vpn ts               — Tailscale: устройства в сети
+Сайт можно писать как домен (ozon.ru), IP/подсеть или ссылку. Весь роутер перезагрузить — reboot.
+EOF
+}
+
+cmd=$1
+[ $# -gt 0 ] && shift
+case "$cmd" in
+    ""|status)  status ;;
+    nodes)      sb-ping ;;
+    test)       sb-ping test ;;
+    use)        sb-ping use "$@" ;;
+    auto)       sb-ping auto ;;
+    gemini)     sb-ping gemini "$@" ;;
+    site|route) sb-ping route "$@" ;;
+    direct)     sb-ping add-direct "$@" ;;
+    proxy)      sb-ping add-proxy "$@" ;;
+    del)        sb-ping del "$@" ;;
+    lists)      sb-ping lists ;;
+    update)     /usr/bin/apply-vless.sh ;;
+    restart)    /usr/bin/sb-restart.sh вручную && echo "Готово." ;;
+    log)        sb-ping events "$@" ;;
+    speed)      /usr/bin/router-speedtest.sh ;;
+    mem)        /usr/bin/mem ;;
+    ts)         tailscale status ;;
+    help|-h|--help) help ;;
+    *)          echo "Не знаю команду «$cmd»."; help; exit 1 ;;
+esac

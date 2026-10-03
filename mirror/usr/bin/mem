@@ -1,0 +1,19 @@
+#!/bin/sh
+# Память роутера. У процессов две цифры: «своя» — настоящая рабочая память (RssAnon);
+# «код» — загруженная с флеша программа (RssFile): ядро выкидывает её при нехватке и подчитывает заново,
+# поэтому на неё не смотрим. Привычная цифра RSS — это их сумма.
+
+echo "========================================="
+awk '/MemAvailable/ {printf " Свободно (Available):  %6.1f MB\n", $2/1024}' /proc/meminfo
+awk '/MemTotal/ {printf " Всего RAM (Total):     %6.1f MB\n", $2/1024}' /proc/meminfo
+awk '/AnonPages/ {printf " Занято программами:    %6.1f MB (настоящая память всех процессов)\n", $2/1024}' /proc/meminfo
+awk '{printf " zram (сжатый своп):    %6.1f MB данных → %.1f MB\n", $1/1048576, $2/1048576}' /sys/block/zram0/mm_stat 2>/dev/null
+echo "========================================="
+echo "   своя      код   процесс"
+
+for p in /proc/[0-9]*; do
+  [ -f "$p/status" ] || continue
+  anon=$(awk '/RssAnon/{print $2}' "$p/status")
+  file=$(awk '/RssFile/{print $2}' "$p/status")
+  [ -n "$anon" ] && [ "$anon" -gt 0 ] && echo "$anon ${file:-0} $(cat $p/comm 2>/dev/null) ${p##*/}"
+done | sort -rn | head -n 10 | awk '{printf "%6.1f MB %5.1f MB   %s (PID %s)\n", $1/1024, $2/1024, $3, $4}'

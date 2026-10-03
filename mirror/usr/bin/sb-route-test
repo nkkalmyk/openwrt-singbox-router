@@ -1,0 +1,25 @@
+# Куда реально уходит запрос: делает curl к хосту и ловит соединение в Clash API.
+import json, subprocess, sys, time, urllib.request
+SECRET = open("/etc/sing-box/.clash-secret").read().strip()
+def conns():
+    req = urllib.request.Request("http://127.0.0.1:9090/connections",
+                                 headers={"Authorization": "Bearer " + SECRET})
+    return json.load(urllib.request.urlopen(req, timeout=5)).get("connections") or []
+hosts = sys.argv[1:]
+for h in hosts:
+    p = subprocess.Popen(["curl", "-s", "-o", "/dev/null", "-m", "8", "--limit-rate", "20k", "https://" + h + "/"])
+    found = None
+    for _ in range(30):
+        for c in conns():
+            if c["metadata"].get("host") == h:
+                found = c
+        if found:
+            break
+        time.sleep(0.2)
+    p.kill()
+    if found:
+        out = found["chains"][0]
+        rule = found["rule"].split(" => ")[0]
+        print(f"{h:34} {'НАПРЯМУЮ' if out == 'direct' else 'VPN: ' + out[:24]:30} {rule[:60]}")
+    else:
+        print(f"{h:34} (соединение не поймано)")

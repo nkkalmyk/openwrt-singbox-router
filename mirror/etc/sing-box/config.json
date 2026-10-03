@@ -1,0 +1,367 @@
+{
+  "log": {
+    "level": "warn"
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "interface_name": "tun0",
+      "address": [
+        "172.19.0.1/30"
+      ],
+      "mtu": 1400,
+      "auto_route": true,
+      "strict_route": true,
+      "stack": "system",
+      "tag": "tun-in"
+    },
+    {
+      "type": "direct",
+      "tag": "dns-in",
+      "listen": "127.0.0.1",
+      "listen_port": 5300
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "vless",
+      "tag": "P1-example-1",
+      "server": "203.0.113.11",
+      "server_port": 443,
+      "uuid": "00000000-0000-0000-0000-000000000000",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "server_name": "www.example.com",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        },
+        "reality": {
+          "enabled": true,
+          "public_key": "REALITY_PUBLIC_KEY",
+          "short_id": "0123abcd"
+        }
+      }
+    },
+    {
+      "type": "vless",
+      "tag": "P1-example-2",
+      "server": "203.0.113.12",
+      "server_port": 443,
+      "uuid": "00000000-0000-0000-0000-000000000000",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "server_name": "www.example.com",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        },
+        "reality": {
+          "enabled": true,
+          "public_key": "REALITY_PUBLIC_KEY",
+          "short_id": "0123abcd"
+        }
+      }
+    },
+    {
+      "type": "vless",
+      "tag": "P2-example-1",
+      "server": "203.0.113.13",
+      "server_port": 443,
+      "uuid": "00000000-0000-0000-0000-000000000000",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "server_name": "www.example.com",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        },
+        "reality": {
+          "enabled": true,
+          "public_key": "REALITY_PUBLIC_KEY",
+          "short_id": "0123abcd"
+        }
+      }
+    },
+    {
+      "type": "vless",
+      "tag": "P2-example-2",
+      "server": "203.0.113.14",
+      "server_port": 443,
+      "uuid": "00000000-0000-0000-0000-000000000000",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "server_name": "www.example.com",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        },
+        "reality": {
+          "enabled": true,
+          "public_key": "REALITY_PUBLIC_KEY",
+          "short_id": "0123abcd"
+        }
+      }
+    },
+    {
+      "type": "urltest",
+      "tag": "gemini-auto",
+      "outbounds": [
+        "P1-example-1",
+        "P1-example-2"
+      ],
+      "interval": "10m",
+      "tolerance": 300,
+      "idle_timeout": "30m",
+      "interrupt_exist_connections": true
+    },
+    {
+      "type": "selector",
+      "tag": "gemini-select",
+      "outbounds": [
+        "gemini-auto",
+        "P1-example-1",
+        "P1-example-2"
+      ],
+      "default": "gemini-auto",
+      "interrupt_exist_connections": true
+    },
+    {
+      "type": "selector",
+      "tag": "proxy",
+      "outbounds": [
+        "auto",
+        "P1-example-1",
+        "P1-example-2",
+        "P2-example-1",
+        "P2-example-2"
+      ],
+      "default": "auto",
+      "interrupt_exist_connections": true
+    },
+    {
+      "type": "urltest",
+      "tag": "auto",
+      "outbounds": [
+        "P1-example-1",
+        "P1-example-2",
+        "P2-example-1",
+        "P2-example-2"
+      ],
+      "interval": "5m",
+      "tolerance": 300,
+      "idle_timeout": "30m",
+      "interrupt_exist_connections": true
+    },
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "default_domain_resolver": "dns-ru",
+    "final": "proxy",
+    "rule_set": [
+      {
+        "tag": "geoip-ru",
+        "type": "local",
+        "format": "binary",
+        "path": "/etc/sing-box/rule-set/geoip-ru.srs"
+      },
+      {
+        "tag": "geosite-category-ru",
+        "type": "local",
+        "format": "binary",
+        "path": "/etc/sing-box/rule-set/geosite-category-ru.srs"
+      },
+      {
+        "tag": "my-direct",
+        "type": "local",
+        "format": "source",
+        "path": "/etc/sing-box/rule-set/my-direct.json"
+      },
+      {
+        "tag": "my-proxy",
+        "type": "local",
+        "format": "source",
+        "path": "/etc/sing-box/rule-set/my-proxy.json"
+      },
+      {
+        "tag": "my-direct-ip",
+        "type": "local",
+        "format": "source",
+        "path": "/etc/sing-box/rule-set/my-direct-ip.json"
+      },
+      {
+        "tag": "my-proxy-ip",
+        "type": "local",
+        "format": "source",
+        "path": "/etc/sing-box/rule-set/my-proxy-ip.json"
+      }
+    ],
+    "rules": [
+      {
+        "inbound": "dns-in",
+        "action": "hijack-dns"
+      },
+      {
+        "inbound": "tun-in",
+        "action": "sniff"
+      },
+      {
+        "ip_cidr": [
+          "203.0.113.11/32",
+          "203.0.113.12/32",
+          "203.0.113.13/32",
+          "203.0.113.14/32"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "domain_suffix": [
+          "nodes.example.com"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "port": [
+          41641
+        ],
+        "outbound": "direct"
+      },
+      {
+        "domain_keyword": [
+          "tailscale"
+        ],
+        "domain_suffix": [
+          "tailscale.com",
+          "tailscale.io",
+          "ts.net"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "ip_cidr": [
+          "100.64.0.0/10"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "network": "udp",
+        "port": 123,
+        "outbound": "direct"
+      },
+      {
+        "domain_suffix": [
+          "gemini.google.com",
+          "aistudio.google.com",
+          "generativelanguage.googleapis.com"
+        ],
+        "outbound": "gemini-select"
+      },
+      {
+        "rule_set": [
+          "my-proxy",
+          "my-proxy-ip"
+        ],
+        "outbound": "proxy"
+      },
+      {
+        "ip_is_private": true,
+        "outbound": "direct"
+      },
+      {
+        "rule_set": [
+          "my-direct",
+          "my-direct-ip"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "domain_suffix": [
+          "ru",
+          "su",
+          "xn--p1ai"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "rule_set": "geosite-category-ru",
+        "outbound": "direct"
+      },
+      {
+        "rule_set": "geoip-ru",
+        "outbound": "direct"
+      },
+      {
+        "network": "udp",
+        "port": 443,
+        "action": "reject"
+      }
+    ]
+  },
+  "dns": {
+    "servers": [
+      {
+        "type": "udp",
+        "tag": "dns-ru",
+        "server": "77.88.8.8"
+      },
+      {
+        "type": "https",
+        "tag": "dns-remote",
+        "server": "1.1.1.1",
+        "detour": "proxy"
+      }
+    ],
+    "rules": [
+      {
+        "rule_set": "my-proxy",
+        "server": "dns-remote"
+      },
+      {
+        "rule_set": "my-direct",
+        "server": "dns-ru"
+      },
+      {
+        "domain_suffix": [
+          "ru",
+          "su",
+          "xn--p1ai"
+        ],
+        "server": "dns-ru"
+      },
+      {
+        "rule_set": "geosite-category-ru",
+        "server": "dns-ru"
+      },
+      {
+        "domain_keyword": [
+          "tailscale"
+        ],
+        "domain_suffix": [
+          "tailscale.com",
+          "tailscale.io",
+          "ts.net"
+        ],
+        "server": "dns-ru"
+      }
+    ],
+    "final": "dns-remote",
+    "strategy": "prefer_ipv4"
+  },
+  "experimental": {
+    "cache_file": {
+      "enabled": true
+    },
+    "clash_api": {
+      "external_controller": "127.0.0.1:9090",
+      "secret": "CHANGE_ME"
+    }
+  }
+}

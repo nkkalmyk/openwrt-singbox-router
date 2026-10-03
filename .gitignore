@@ -1,0 +1,4 @@
+.DS_Store
+backups/
+mirror/STATE.txt
+publish/private.txt
