@@ -308,7 +308,10 @@ def build():
 
 
 def git(*args):
-    return subprocess.run(["git", "-C", OUT, *args], check=True, text=True, capture_output=True).stdout
+    r = subprocess.run(["git", "-C", OUT, *args], text=True, capture_output=True)
+    if r.returncode:
+        sys.exit(f"git {' '.join(args)}: {r.stderr.strip()}")
+    return r.stdout
 
 
 def main():
@@ -335,7 +338,7 @@ def main():
         print("Изменений нет — отправлять нечего.")
         return
     git("commit", "-q", "-m", a.message)
-    git("push", "-q")
+    git("push", "-q", "origin", "HEAD:main")
     print("Отправлено: " + git("remote", "get-url", "origin").strip())
 
 
