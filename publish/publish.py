@@ -28,6 +28,7 @@ FILES = [
     ("publish/README.public.md", "README.ru.md"),
     ("publish/LICENSE.public.md", "LICENSE"),
     ("publish/SETUP.public.md", "docs/setup.md"),
+    ("publish/TELEGRAM.public.md", "docs/telegram.md"),
     ("CLAUDE.md", None),
     ("docs/*.md", None),
     ("scripts/pull-from-router.sh", None),

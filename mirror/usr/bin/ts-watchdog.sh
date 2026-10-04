@@ -14,7 +14,12 @@ SOCK=/var/run/tailscale/tailscaled.sock
 mkdir -p "$STATE"
 
 if ! pidof tailscaled >/dev/null; then
-    event ts-watchdog "tailscaled не запущен — запускаю"
+    # Пробуем каждый раз, а в журнал пишем не чаще раза в 30 мин — если запуск не удаётся, не засорять.
+    now=$(date +%s)
+    [ $((now - $(cat "$STATE/start_logged" 2>/dev/null || echo 0))) -ge 1800 ] && {
+        event ts-watchdog "tailscaled не запущен — запускаю"
+        echo "$now" > "$STATE/start_logged"
+    }
     /etc/init.d/tailscale start
     exit 0
 fi

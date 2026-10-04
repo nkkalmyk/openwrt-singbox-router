@@ -1,0 +1,334 @@
+#!/bin/sh
+# Уведомления в Telegram, cron раз в минуту. Пишет только о важном:
+#  - VPN не работает 10+ мин (счётчик сторожа /tmp/sb-watchdog/proxy_fail) и когда снова заработал;
+#  - у провайдера пропадал интернет 5+ мин (сообщение уходит, когда интернет вернулся);
+#  - роутер перезагрузился (пропадало питание или автоперезагрузка) и примерно сколько был выключен;
+#  - важные события автоматики из /root/events.log (откат конфига, перезагрузка, Tailscale требует входа, …).
+# Не отправилось (нет связи) — сообщение ждёт в очереди и уйдёт, когда связь появится.
+#   router-notify            — обычный запуск (cron)
+#   router-notify --setup    — подключить бота (vpn tg setup)
+#   router-notify --test     — отправить проверочное сообщение (vpn tg test)
+#   router-notify --status   — подключён ли, сколько сообщений ждёт (vpn tg)
+#   router-notify --bot      — принимать команды из Telegram (служба /etc/init.d/router-bot)
+# Токен бота и chat id — в /etc/router-notify.conf (секрет: не печатать, не класть в mirror/ и publish).
+. /usr/lib/sb-common.sh
+CONF=/etc/router-notify.conf
+ST=/root/.notify
+Q=$ST/queue
+VPN_ALERT_MIN=10
+INET_REPORT_MIN=5
+HEARTBEAT_EVERY=900
+QUEUE_KEEP=30
+# Какие события автоматики пересылать (остальные — обычная работа: смена адресов, перетест нод и т. п.)
+IMPORTANT='НЕВАЛИДН|откат|Перезагружаю|network restart|Мертвы все ноды|требует входа|не в строю|Конфиг невалиден|не поднялись|не запущен|Проблема сейчас'
+
+TG_TOKEN='' TG_CHAT='' TG_ENABLED=1
+[ -f "$CONF" ] && . "$CONF"
+
+api() {   # api <метод> [curl -d …] — сначала обычным путём (через VPN), не вышло — напрямую через провайдера
+    local m=$1 ip
+    shift
+    curl -sf -m 15 "$@" "https://api.telegram.org/bot$TG_TOKEN/$m" && return 0
+    ip=$(nslookup api.telegram.org 77.88.8.8 2>/dev/null | awk '/^Address/ && $NF !~ /:/ {a = $NF} END {print a}')
+    [ -n "$ip" ] && curl -sf -m 15 --interface "$(wan_dev)" --resolve "api.telegram.org:443:$ip" "$@" \
+        "https://api.telegram.org/bot$TG_TOKEN/$m"
+}
+
+send() {
+    api sendMessage --data-urlencode "chat_id=$TG_CHAT" --data-urlencode "text=$1" >/dev/null
+}
+
+# В очереди сообщение — одна строка; перевод строки записан как \n.
+enqueue() {
+    mkdir -p "$ST"
+    echo "$*" >> "$Q"
+    tail -n "$QUEUE_KEEP" "$Q" > "$Q.tmp" && mv "$Q.tmp" "$Q"
+}
+
+flush() {
+    local line fail=0
+    [ -s "$Q" ] || return 0
+    : > "$Q.rest"
+    while IFS= read -r line; do
+        if [ "$fail" = 0 ] && send "$(printf '%s' "$line" | sed 's/\\n/\n/g')"; then
+            :
+        else
+            fail=1
+            echo "$line" >> "$Q.rest"
+        fi
+    done < "$Q"
+    if [ -s "$Q.rest" ]; then mv "$Q.rest" "$Q"; else rm -f "$Q" "$Q.rest"; fi
+}
+
+# Запомнить текущее состояние, чтобы после подключения не прислать старое (историю событий, «перезагрузку»).
+init_state() {
+    mkdir -p "$ST"
+    cat /proc/sys/kernel/random/boot_id > "$ST/boot_id"
+    date +%s > "$ST/heartbeat"
+    tail -n 1 "$EVENTS" 2>/dev/null > "$ST/events_last"
+    rm -f "$Q" "$ST/vpn_alerted" "$ST/inet_down"
+}
+
+setup() {
+    local token me name updates chat who
+    echo "Подключаем уведомления от роутера в Telegram."
+    echo
+    echo "1. В Telegram открой @BotFather, отправь /newbot, придумай боту имя и адрес (на конце «bot»)."
+    echo "   BotFather пришлёт токен — длинную строку вида 123456789:AAH…"
+    # Бот команд сам читает сообщения — на время настройки остановить, иначе он заберёт твоё сообщение.
+    [ -x /etc/init.d/router-bot ] && /etc/init.d/router-bot stop
+    printf "   Вставь токен сюда и нажми Enter: "
+    read -r token
+    token=$(printf '%s' "$token" | tr -d ' \r')
+    TG_TOKEN=$token
+    me=$(api getMe) || { echo "   Telegram не принял токен (или нет связи). Проверь токен и запусти ещё раз: vpn tg setup"; exit 1; }
+    name=$(echo "$me" | jsonfilter -e '@.result.username')
+    echo "   Бот найден: @$name"
+    echo
+    echo "2. Открой бота: https://t.me/$name — нажми «Старт» (или отправь ему любое сообщение)."
+    printf "   Потом вернись сюда и нажми Enter: "
+    read -r _
+    updates=$(api getUpdates)
+    chat=$(echo "$updates" | jsonfilter -e '@.result[*].message.chat.id' | tail -n 1)
+    who=$(echo "$updates" | jsonfilter -e '@.result[*].message.chat.first_name' | tail -n 1)
+    [ -n "$chat" ] || { echo "   Сообщения от тебя не видно. Напиши боту ещё раз и запусти: vpn tg setup"; exit 1; }
+    TG_CHAT=$chat
+    umask 077
+    printf "TG_TOKEN='%s'\nTG_CHAT='%s'\nTG_ENABLED=1\n" "$TG_TOKEN" "$TG_CHAT" > "$CONF"
+    init_state
+    [ -x /etc/init.d/router-bot ] && /etc/init.d/router-bot start
+    if send "✅ Роутер подключён. Буду писать сюда, только если что-то сломалось или починилось.
+
+$BOT_HELP"; then
+        echo "   Готово: отправил сообщение в чат «$who». Проверь Telegram."
+    else
+        echo "   Настройки сохранены, но сообщение не ушло. Проверь позже: vpn tg test"
+    fi
+}
+
+# ---------- Команды из Telegram (router-notify --bot, служба /etc/init.d/router-bot) ----------
+# Бот слушает Telegram (long polling) и отвечает только на сообщения из чата TG_CHAT, остальные молча игнорирует.
+# Опасные команды (/restart, /reboot) — только с подтверждением в течение 2 минут.
+# Старые сообщения не выполняются: при запуске бот пропускает всё, что пришло, пока он не работал,
+# а сообщения старше 2 минут игнорирует (иначе /reboot_yes после перезагрузки выполнился бы снова).
+BOT_PENDING=/tmp/router-bot.pending
+
+BOT_HELP="Команды:
+/status — состояние: интернет, VPN, sing-box, Tailscale
+/nodes — ноды и задержки
+/gemini — ноды для Gemini
+/report — отчёт за 12 часов
+/log — что делала автоматика
+/site ozon.ru — куда идёт сайт (напрямую или VPN)
+/auto — вернуть автовыбор ноды
+/update — обновить ноды из подписок
+/speed — замер скорости (~1 мин)
+/restart — перезапустить sing-box (~6 с без интернета)
+/reboot — перезагрузить роутер (~2 мин без интернета)"
+
+# Отправить вывод команды моноширинным текстом, кусками до ~3500 байт (лимит Telegram — 4096 символов).
+send_pre() {
+    printf '%s\n' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' \
+        | awk -v max=3500 '{ if (n + length($0) + 1 > max && n > 0) { printf "%s", "\036"; n = 0 } print; n += length($0) + 1 }' \
+        | awk 'BEGIN { RS = "\036" } { print > ("/tmp/router-bot.part" NR) }'
+    for f in /tmp/router-bot.part*; do
+        [ -f "$f" ] || continue
+        api sendMessage --data-urlencode "chat_id=$TG_CHAT" --data-urlencode "parse_mode=HTML" \
+            --data-urlencode "text=<pre>$(cat "$f")</pre>" >/dev/null
+        rm -f "$f"
+    done
+}
+
+bot_run() {   # bot_run <команда> [аргумент]
+    local cmd=$1 arg=$2 now pend
+    now=$(date +%s)
+    case "$cmd" in
+        /start|/help) send "$BOT_HELP" ;;
+        /status)  send_pre "$(/usr/bin/vpn status 2>&1)" ;;
+        /nodes)   send_pre "$(/usr/bin/vpn nodes 2>&1)" ;;
+        /gemini)  send_pre "$(/usr/bin/vpn gemini 2>&1)" ;;
+        /report)  send_pre "$(/usr/bin/vpn report 2>&1)" ;;
+        /log)     send_pre "$(/usr/bin/vpn log 15 2>&1)" ;;
+        /site)
+            if printf '%s' "$arg" | grep -Eq '^[A-Za-z0-9.:/_-]{1,200}$'; then
+                send_pre "$(/usr/bin/vpn site "$arg" 2>&1)"
+            else
+                send "Напиши сайт после команды, например: /site ozon.ru"
+            fi ;;
+        /auto)    send_pre "$(/usr/bin/vpn auto 2>&1)" ;;
+        /update)  send "Обновляю ноды из подписок…"; send_pre "$(/usr/bin/vpn update 2>&1 | tail -n 15)" ;;
+        /speed)   send "Замеряю, это около минуты…"; send_pre "$(/usr/bin/vpn speed 2>&1)" ;;
+        /restart|/reboot)
+            echo "$cmd $now" > "$BOT_PENDING"
+            if [ "$cmd" = /restart ]; then
+                send "Перезапустить sing-box? Интернет пропадёт секунд на 6. Подтверди: /restart_yes (в течение 2 мин)"
+            else
+                send "Перезагрузить роутер? Интернет пропадёт минуты на 2. Подтверди: /reboot_yes (в течение 2 мин)"
+            fi ;;
+        /restart_yes|/reboot_yes)
+            pend=$(cat "$BOT_PENDING" 2>/dev/null)
+            rm -f "$BOT_PENDING"
+            if [ "${pend% *}" != "${cmd%_yes}" ] || [ $((now - ${pend#* })) -gt 120 ]; then
+                send "Нечего подтверждать. Сначала ${cmd%_yes}"
+            elif [ "$cmd" = /restart_yes ]; then
+                send "Перезапускаю sing-box…"
+                event router-bot "Перезапуск sing-box из Telegram"
+                /usr/bin/sb-restart.sh telegram >/dev/null 2>&1
+                sleep 5
+                send_pre "$(/usr/bin/vpn status 2>&1 | head -n 8)"
+            else
+                event router-bot "Перезагрузка роутера из Telegram"
+                send "Перезагружаюсь. Напишу, когда поднимусь."
+                api getUpdates -d "offset=$BOT_OFFSET" -d timeout=0 >/dev/null   # подтвердить, чтобы команда не повторилась
+                sleep 2
+                reboot
+                sleep 60
+            fi ;;
+        *) send "Не знаю такой команды. /help — список." ;;
+    esac
+}
+
+bot() {
+    local upd line id chat date text cmd arg
+    BOT_OFFSET=0
+    while :; do
+        TG_TOKEN='' TG_CHAT='' TG_ENABLED=1
+        [ -f "$CONF" ] && . "$CONF"
+        if [ -z "$TG_TOKEN" ] || [ -z "$TG_CHAT" ] || [ "$TG_ENABLED" = 0 ]; then
+            BOT_OFFSET=0; sleep 60; continue
+        fi
+        if [ "$BOT_OFFSET" = 0 ]; then
+            # Первый запуск: пропустить всё, что пришло, пока бот не работал, и показать меню команд.
+            upd=$(api getUpdates -d offset=-1 -d timeout=0) || { sleep 30; continue; }
+            id=$(echo "$upd" | jq -r '.result[-1].update_id // empty' 2>/dev/null)
+            BOT_OFFSET=$(( ${id:-0} + 1 ))
+            api setMyCommands --data-urlencode 'commands=[{"command":"status","description":"состояние"},{"command":"nodes","description":"ноды"},{"command":"gemini","description":"ноды для Gemini"},{"command":"report","description":"отчёт за 12 ч"},{"command":"log","description":"журнал автоматики"},{"command":"site","description":"куда идёт сайт"},{"command":"auto","description":"автовыбор ноды"},{"command":"update","description":"обновить ноды"},{"command":"speed","description":"замер скорости"},{"command":"restart","description":"перезапуск sing-box"},{"command":"reboot","description":"перезагрузка роутера"},{"command":"help","description":"все команды"}]' >/dev/null
+        fi
+        upd=$(api getUpdates -d "offset=$BOT_OFFSET" -d timeout=50 -d 'allowed_updates=["message"]' -m 65) || { sleep 15; continue; }
+        echo "$upd" | jq -r '.result[] | [.update_id, (.message.chat.id // 0), (.message.date // 0),
+            ((.message.text // "") | split("\t") | join(" ") | split("\n") | join(" "))] | @tsv' 2>/dev/null > /tmp/router-bot.updates
+        while IFS="$(printf '\t')" read -r id chat date text; do
+            BOT_OFFSET=$((id + 1))
+            [ "$chat" = "$TG_CHAT" ] || continue
+            [ $(( $(date +%s) - date )) -le 120 ] || continue
+            [ -n "$text" ] || continue          # стикеры, фото и т. п.
+            cmd=$(printf '%s' "$text" | awk '{print tolower($1)}' | sed 's/@.*//')
+            arg=$(printf '%s' "$text" | awk '{print $2}')
+            logger -t router-bot "команда: $cmd $arg"
+            bot_run "$cmd" "$arg"
+        done < /tmp/router-bot.updates
+    done
+}
+
+case "$1" in
+    --bot) bot; exit ;;
+    --setup) setup; exit ;;
+    --test)
+        [ -n "$TG_TOKEN" ] || { echo "Уведомления не настроены: vpn tg setup"; exit 1; }
+        send "🔔 Проверка: роутер на связи, $(date '+%d.%m %H:%M')." && echo "Отправлено." || { echo "Не отправилось."; exit 1; }
+        exit ;;
+    --status)
+        if [ -z "$TG_TOKEN" ]; then echo "Уведомления в Telegram не настроены. Подключить: vpn tg setup"
+        else
+            [ "$TG_ENABLED" = 0 ] && echo "Уведомления в Telegram: выключены (включить: vpn tg on)" \
+                                  || echo "Уведомления в Telegram: включены (выключить: vpn tg off, проверить: vpn tg test)"
+            [ -s "$Q" ] && echo "Ждут отправки: $(wc -l < "$Q")"
+            pgrep -f "router-notify --bot" >/dev/null && echo "Команды из Telegram: работают (/help в чате с ботом)" \
+                || echo "Команды из Telegram: служба не запущена (/etc/init.d/router-bot start)"
+        fi
+        exit ;;
+    --on|--off)
+        [ -f "$CONF" ] || { echo "Сначала: vpn tg setup"; exit 1; }
+        v=1; [ "$1" = --off ] && v=0
+        sed -i "s/^TG_ENABLED=.*/TG_ENABLED=$v/" "$CONF"
+        chmod 600 "$CONF"
+        [ "$v" = 1 ] && { init_state; echo "Уведомления включены."; } || echo "Уведомления выключены."
+        exit ;;
+esac
+
+[ -n "$TG_TOKEN" ] && [ -n "$TG_CHAT" ] && [ "$TG_ENABLED" != 0 ] || exit 0
+# Предыдущий запуск ещё отправляет (Telegram недоступен — до 30 с на попытку) — не дублируем.
+exec 8>/tmp/router-notify.lock
+flock -n 8 || exit 0
+[ -d "$ST" ] || init_state
+now=$(date +%s)
+up=$(cut -d. -f1 /proc/uptime)
+
+# 1) Перезагрузка. Ждём 2 мин после старта, чтобы часы успели синхронизироваться.
+boot=$(cat /proc/sys/kernel/random/boot_id)
+if [ "$(cat "$ST/boot_id" 2>/dev/null)" != "$boot" ] && [ "$up" -ge 120 ]; then
+    last=$(cat "$ST/heartbeat" 2>/dev/null)
+    msg="🔄 $(date '+%d.%m %H:%M') Роутер перезагрузился."
+    if [ -n "$last" ]; then
+        msg="$msg До этого работал примерно до $(date -d "@$last" '+%d.%m %H:%M') (точность ±15 мин)."
+        since_t=$(date -d "@$((last - 900))" '+%Y-%m-%d %H:%M:%S')
+        if awk -v t="$since_t" '$0 >= t && /Перезагрузка роутера из Telegram/ {f = 1} END {exit !f}' "$EVENTS" 2>/dev/null; then
+            msg="$msg\nЭто была перезагрузка по твоей команде из Telegram."
+        elif awk -v t="$since_t" '$0 >= t && /Перезагружаю роутер/ {f = 1} END {exit !f}' "$EVENTS" 2>/dev/null; then
+            msg="$msg\nЭто была автоперезагрузка: сеть не поднималась (подробно: vpn log)."
+        else
+            msg="$msg\nПохоже, пропадало питание или роутер перезагрузили вручную."
+        fi
+    fi
+    enqueue "$msg"
+    echo "$boot" > "$ST/boot_id"
+    echo "$now" > "$ST/heartbeat"
+fi
+# Метка «роутер жив» — раз в 15 мин (на флеш, поэтому не чаще).
+hb=$(cat "$ST/heartbeat" 2>/dev/null)
+[ $((now - ${hb:-0})) -ge "$HEARTBEAT_EVERY" ] && echo "$now" > "$ST/heartbeat"
+
+# 2) Интернет у провайдера
+if direct_ok; then
+    inet=1
+    if [ -f "$ST/inet_down" ]; then
+        s=$(cat "$ST/inet_down")
+        m=$(( (now - s) / 60 ))
+        [ "$m" -ge "$INET_REPORT_MIN" ] && enqueue "🌐 У провайдера не было интернета $m мин: с $(date -d "@$s" '+%H:%M') до $(date '+%H:%M'). Роутер тут ни при чём."
+        rm -f "$ST/inet_down"
+    fi
+else
+    inet=0
+    [ -f "$ST/inet_down" ] || echo "$now" > "$ST/inet_down"
+fi
+
+# 3) VPN — по счётчику сторожа (минуты подряд без VPN при живом провайдере)
+n=$(cat /tmp/sb-watchdog/proxy_fail 2>/dev/null || echo 0)
+if [ "$n" -ge "$VPN_ALERT_MIN" ] && [ ! -f "$ST/vpn_alerted" ]; then
+    echo "$((now - n * 60))" > "$ST/vpn_alerted"
+    enqueue "🔴 $(date '+%H:%M') VPN не работает уже $n мин, автоматика пока не справилась.\nРоссийские сайты открываются, зарубежные — нет. Подробно: vpn"
+elif [ "$n" -eq 0 ] && [ -f "$ST/vpn_alerted" ] && [ "$inet" = 1 ] && [ "$up" -ge 300 ] && tunnel_ok; then
+    s=$(cat "$ST/vpn_alerted")
+    enqueue "✅ $(date '+%H:%M') VPN снова работает. Не работал ~$(( (now - s) / 60 )) мин, с $(date -d "@$s" '+%H:%M')."
+    rm -f "$ST/vpn_alerted"
+fi
+
+# 4) Важные события автоматики — всё, что появилось в журнале после последней просмотренной строки.
+if [ -s "$EVENTS" ]; then
+    lastline=$(cat "$ST/events_last" 2>/dev/null)
+    awk -v last="$lastline" -v pat="$IMPORTANT" '
+        { line[NR] = $0; if ($0 == last) from = NR }
+        END {
+            start = NR + 1                       # первый запуск (нет last) — ничего не пересылаем
+            if (from) start = from + 1
+            else if (last != "")                 # строку вытеснила ротация журнала — берём всё, что новее по времени
+                for (i = 1; i <= NR; i++) if (substr(line[i], 1, 19) > substr(last, 1, 19)) { start = i; break }
+            for (i = start; i <= NR; i++)
+                if (line[i] ~ pat) print "⚠️ " substr(line[i], 12, 5) " " substr(line[i], 21)
+        }' "$EVENTS" | while IFS= read -r ev; do
+        # Одно и то же событие (без учёта времени и чисел) — не чаще раза в час: если что-то повторяется
+        # каждые пару минут, хватит одного сообщения.
+        key=$(printf '%s' "$ev" | tr -d '0-9')
+        if ! awk -v k="$key" -v t=$((now - 3600)) -F '\t' '$1 >= t && $2 == k {f = 1} END {exit !f}' "$ST/recent" 2>/dev/null; then
+            enqueue "$ev"
+            printf '%s\t%s\n' "$now" "$key" >> "$ST/recent"
+        fi
+    done
+    [ -f "$ST/recent" ] && awk -v t=$((now - 3600)) -F '\t' '$1 >= t' "$ST/recent" > "$ST/recent.tmp" \
+        && mv "$ST/recent.tmp" "$ST/recent"
+    [ "$(tail -n 1 "$EVENTS")" = "$lastline" ] || tail -n 1 "$EVENTS" > "$ST/events_last"
+fi
+
+# 5) Отправить накопленное (без интернета у провайдера — даже не пытаться)
+[ "$inet" = 1 ] && flush
+exit 0

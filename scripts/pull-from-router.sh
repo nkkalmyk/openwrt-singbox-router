@@ -18,6 +18,7 @@ FILES="
 /etc/sing-box/rule-set/my-proxy.json
 /etc/sing-box/rule-set/my-proxy-ip.json
 /etc/init.d/sing-box
+/etc/init.d/router-bot
 /etc/init.d/zram
 /etc/init.d/tailscale
 /etc/config/sing-box
@@ -48,6 +49,7 @@ FILES="
 /usr/bin/vpn
 /usr/bin/router-speedtest.sh
 /usr/bin/router-report
+/usr/bin/router-notify
 "
 
 echo "Снимаю файлы с $HOST..."

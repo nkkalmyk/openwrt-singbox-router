@@ -156,9 +156,9 @@ SUB2_URL = "https://subscription.example/CHANGE_ME"   # ← запасной (P2
 # на компьютере
 COPYFILE_DISABLE=1 tar --uid 0 --gid 0 --uname root --gname root -C mirror -cf - \
     usr etc/init.d/sing-box etc/config/sing-box etc/config/https-dns-proxy etc/sing-box \
-    etc/sysctl.conf etc/sysupgrade.conf etc/crontabs/root \
+    etc/init.d/router-bot etc/sysctl.conf etc/sysupgrade.conf etc/crontabs/root \
   | ssh router 'tar -xf - -C /'
-ssh router 'chmod 755 /usr/bin/vpn /usr/bin/sb-* /usr/bin/*.sh /usr/bin/*.py /usr/bin/mem /usr/bin/router-report /etc/init.d/sing-box'
+ssh router 'chmod 755 /usr/bin/vpn /usr/bin/sb-* /usr/bin/*.sh /usr/bin/*.py /usr/bin/mem /usr/bin/router-report /usr/bin/router-notify /etc/init.d/sing-box /etc/init.d/router-bot'
 ```
 
 - `--uid 0 --gid 0 --uname root --gname root` — без них файлы и даже каталоги `/usr`, `/usr/bin` на роутере станут
@@ -172,6 +172,7 @@ ssh router 'chmod 755 /usr/bin/vpn /usr/bin/sb-* /usr/bin/*.sh /usr/bin/*.py /us
 | `mirror/usr/lib/sb-common.sh` | `/usr/lib/sb-common.sh` | общая библиотека: проверки, блокировка, журнал |
 | `mirror/usr/bin/*` | `/usr/bin/` | `vpn`, `sb-ping`, `update-vless.py`, `apply-vless.sh`, сторожа, отчёт, бэкап |
 | `mirror/etc/init.d/sing-box` | `/etc/init.d/sing-box` | служба: лимиты памяти, безопасный перезапуск при подъёме WAN |
+| `mirror/etc/init.d/router-bot` | `/etc/init.d/router-bot` | бот команд в Telegram (по желанию, шаг 7) |
 | `mirror/etc/config/sing-box` | `/etc/config/sing-box` | включает службу, запуск от root (нужно для TUN) |
 | `mirror/etc/config/https-dns-proxy` | `/etc/config/https-dns-proxy` | запасной DoH на 5053, запрет чужих DNS из LAN |
 | `mirror/etc/sing-box/config.json` | `/etc/sing-box/config.json` | конфиг sing-box — с примерными нодами, доводится в шаге 4 |
@@ -427,9 +428,10 @@ curl -s --interface "$W" https://1.1.1.1/cdn-cgi/trace | grep -E '^(ip|loc)='  #
 | `7,37 * * * *` | `apply-vless.sh` — обновить подписки; перезапуск только если сменились серверы |
 | `* * * * *` | `sb-watchdog.sh` — сторож sing-box |
 | `*/5 * * * *` | `health.sh` — строка состояния в `/tmp/health.log` |
-| `45 4,16 * * *` | `router-report --save` — отчёт о здоровье в `/root/reports.log` (`vpn report`) |
-| `0 5 * * 0` | `update-rulesets.sh` — базы geoip/geosite |
-| `30 5 * * 0` | `router-backup.sh` — полный бэкап в `/root/backups` (хранит 2) |
+| `45 7,19 * * *` | `router-report --save` — отчёт о здоровье в `/root/reports.log` (`vpn report`) |
+| `0 8 * * 0` | `update-rulesets.sh` — базы geoip/geosite |
+| `30 8 * * 0` | `router-backup.sh` — полный бэкап в `/root/backups` (хранит 2) |
+| `* * * * *` | `router-notify` — уведомления в Telegram (пока не подключены — сразу выходит) |
 | `*/2 * * * *` | `ts-watchdog.sh` — сторож Tailscale |
 
 Без Tailscale убери его строку: `sed -i '/ts-watchdog/d' /etc/crontabs/root`.
@@ -449,6 +451,15 @@ uci commit system; /etc/init.d/system reload
 
 Проверка, что сторож живой: останови sing-box `/etc/init.d/sing-box stop` (именно stop, procd тогда не перезапускает
 сам) и подожди минуту — `vpn log` покажет «sing-box не запущен — поднимаю … готово».
+
+### Telegram: уведомления и команды (по желанию)
+
+```sh
+/etc/init.d/router-bot enable; /etc/init.d/router-bot start   # служба команд; без настройки просто ждёт
+vpn tg setup                                                   # токен от @BotFather → «Старт» в боте → Enter
+```
+Придёт «✅ Роутер подключён» со списком команд. Попробуй `/status`. Что бот присылает, какие команды понимает
+и как защищён — [telegram.md](telegram.md).
 
 Все скрипты делят одну блокировку `/tmp/apply-vless.lock` и не мешают друг другу. Что они делают и когда что-то
 перезапускают — [architecture.md](architecture.md), разделы «Подписки и автоматика» и «Что будет, если…».

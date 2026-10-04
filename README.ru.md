@@ -13,6 +13,8 @@
 - **Автоматика устойчивости:** обновление подписок раз в 30 мин с откатом, сторож sing-box, безопасный перезапуск,
   постоянный журнал событий, сторож Tailscale. Всё на busybox-шелле и python3.
 - **Tailscale** на роутере: удалённый доступ и exit node, трафик Tailscale идёт мимо sing-box.
+- **Telegram:** роутер сам пишет, когда что-то сломалось и починилось, и принимает команды (`/status`, `/nodes`,
+  `/restart`…) — откуда угодно, без белого IP. Подробно — [docs/telegram.md](docs/telegram.md).
 
 ## Что где
 
@@ -20,6 +22,7 @@
 |---|---|
 | [CLAUDE.md](CLAUDE.md) | Точка входа для агентов: доступ, золотые правила, открытые вопросы (`AGENTS.md` — ссылка на него) |
 | [docs/setup.md](docs/setup.md) | **Как собрать такое же самому:** пошагово с нуля — пакеты, какой файл куда, что подставить, первый запуск, что делать, если не заработало. Проверено сборкой в виртуалке |
+| [docs/telegram.md](docs/telegram.md) | **Роутер в Telegram:** уведомления о сбоях и команды из чата — подключение за 3 минуты |
 | [docs/architecture.md](docs/architecture.md) | Как всё устроено: путь трафика, правила, DNS, автоматика, «что будет, если…» |
 | [docs/runbook.md](docs/runbook.md) | Типовые задачи и что делать, если что-то сломалось |
 | [docs/history.md](docs/history.md) | Что и почему меняли, принятые решения |
@@ -47,11 +50,12 @@
 | [router-backup.sh](mirror/usr/bin/router-backup.sh) | Полный бэкап `sysupgrade -b`, хранит два | cron, раз в неделю |
 | [router-speedtest.sh](mirror/usr/bin/router-speedtest.sh) | Замер скорости через VPN и напрямую, приём и отдача, загрузка CPU | `vpn speed` |
 | [router-report](mirror/usr/bin/router-report) | Отчёт о здоровье за N часов: текущие проверки, провалы VPN и провайдера, память, журнал событий, итог | cron, 2 раза в день; `vpn report` |
+| [router-notify](mirror/usr/bin/router-notify) | Уведомления в Telegram (VPN лёг/вернулся, нет интернета у провайдера, перезагрузка, важные события); в режиме `--bot` — команды из чата | cron раз в минуту; служба `router-bot` |
 | [mem](mirror/usr/bin/mem) | Память по процессам: своя (RssAnon) и код (RssFile) | руками |
 | [sb-route-test](mirror/usr/bin/sb-route-test) | Открывает список сайтов и показывает, через какую ноду и по какому правилу ушло каждое соединение | руками |
 
 Рядом: службы [init.d/sing-box](mirror/etc/init.d/sing-box) (лимиты памяти Go, безопасный триггер на подъём WAN) и
-[init.d/tailscale](mirror/etc/init.d/tailscale), расписание [crontabs/root](mirror/etc/crontabs/root),
+[init.d/tailscale](mirror/etc/init.d/tailscale), [init.d/router-bot](mirror/etc/init.d/router-bot) (бот команд в Telegram), расписание [crontabs/root](mirror/etc/crontabs/root),
 пример [config.json](mirror/etc/sing-box/config.json) sing-box.
 
 На Mac ([scripts/](scripts/)): [pull-from-router.sh](scripts/pull-from-router.sh) снимает снимок настроек и бэкап,
@@ -68,7 +72,8 @@ vpn direct example.ru    # этот сайт всегда напрямую (vpn 
 vpn update               # обновить ноды из подписок (перезапуск, только если они изменились)
 vpn restart              # безопасно перезапустить sing-box (~6 с без интернета)
 vpn log                  # что делала автоматика
-vpn report 24            # отчёт о здоровье за сутки с итогом
+vpn report 24            # отчёт о здоровье за сутки: «всё хорошо» / «были сбои, автоматика справилась» / «проблема сейчас»
+vpn tg setup             # подключить Telegram: уведомления и команды (/status, /nodes, /restart…)
 vpn speed                # замер скорости через VPN и напрямую
 ```
 

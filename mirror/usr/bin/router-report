@@ -74,9 +74,7 @@ backend = tsj.get("BackendState", "не отвечает")
 p(f"  {'Tailscale':22} {backend}")
 if backend != "Running":
     warn.append(f"Tailscale: {backend}")
-allowed = (tsj.get("Self") or {}).get("AllowedIPs") or []
-if "0.0.0.0/0" not in allowed:
-    info.append("exit node роутера не одобрен в админке Tailscale")
+# Одобрение exit node в админке Tailscale не проверяем — пользователь решил не напоминать (2026-10-04).
 
 pid = sh("pidof sing-box")
 pid = pid.stdout.split()[0] if pid and pid.stdout.strip() else None

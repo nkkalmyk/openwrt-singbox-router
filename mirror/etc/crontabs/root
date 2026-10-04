@@ -5,3 +5,4 @@
 0 8 * * 0 /usr/bin/update-rulesets.sh
 */2 * * * * /usr/bin/ts-watchdog.sh
 45 7,19 * * * /usr/bin/router-report --save >/dev/null 2>&1
+* * * * * /usr/bin/router-notify >/dev/null 2>&1
