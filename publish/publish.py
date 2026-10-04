@@ -201,7 +201,7 @@ CHECKS = [
     ("MAC", re.compile(r"\b(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}\b")),
     ("IPv6", re.compile(r"\b[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){3,7}\b|\bf[cd][0-9a-f]{2}:[0-9a-f]{1,4}:", re.I)),
     ("UUID", re.compile(r"\b(?!00000000-0000-0000-0000-000000000000)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)),
-    ("e-mail", re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")),
+    ("e-mail", re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}\b")),
     ("ссылка на ноду", re.compile(r"\b(?:vless|vmess|trojan|ss|hysteria2?|tuic)://[^\s\"']{8,}", re.I)),
     ("hex-токен", re.compile(r"(?<![~\w])[0-9a-fA-F]{16,}\b")),   # после ~ — хэш версии пакета apk
 ]
@@ -230,7 +230,7 @@ def node_words_regex():
     return re.compile(r"\b(?:" + "|".join(map(re.escape, sorted(words, key=len, reverse=True))) + r")\b")
 
 
-def check(path, text, rules, node_rx):
+def check(path, text, rules, node_rx, authored=False):
     problems = []
     if node_rx:
         for m in node_rx.finditer(text):
@@ -240,7 +240,7 @@ def check(path, text, rules, node_rx):
             ip = ipaddress.ip_address(m.group(1))
         except ValueError:
             continue
-        if not any(ip in net for net in ALLOWED_NETS):
+        if not any(ip in net for net in ALLOWED_NETS) and not (authored and ip.is_private):
             problems.append(f"IP {m.group(1)}")
     for name, rx in CHECKS:
         for m in rx.finditer(text):
@@ -249,6 +249,8 @@ def check(path, text, rules, node_rx):
         if looks_like_key(m.group(0)):
             problems.append(f"похоже на ключ: {m.group(0)[:12]}…")
     for kind, a, _ in rules:
+        if authored and kind in ("lit", "re"):
+            continue
         if kind == "lit" and a in text:
             problems.append(f"осталось из private.txt: {a[:30]}")
         elif kind == "re" and a.sub(_, text) != text:   # повторная замена что-то меняет — значит, осталось
@@ -291,8 +293,12 @@ def build():
                 text = fn(text)
         for rx, repl in GENERIC:
             text = rx.sub(repl, text)
-        text = apply_private(text, rules)
-        problems += check(dst, text, rules, node_rx)
+        # Тексты, написанные сразу для публики (publish/*.public.md): личные замены не нужны и испортили бы
+        # примеры вроде стандартного UPSTREAM_IP; частные адреса в них допустимы, остальные проверки — те же.
+        authored = src.startswith("publish/") and src.endswith(".public.md")
+        if not authored:
+            text = apply_private(text, rules)
+        problems += check(dst, text, rules, node_rx, authored)
         out = os.path.join(OUT, dst)
         os.makedirs(os.path.dirname(out), exist_ok=True)
         with open(out, "w", encoding="utf-8") as f:
