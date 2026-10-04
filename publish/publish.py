@@ -24,7 +24,9 @@ PRIVATE = os.path.join(ROOT, "publish", "private.txt")
 
 # (источник относительно ROOT или glob, путь в выгрузке; None — тот же)
 FILES = [
-    ("publish/README.public.md", "README.md"),
+    ("publish/README.en.public.md", "README.md"),
+    ("publish/README.public.md", "README.ru.md"),
+    ("publish/LICENSE.public.md", "LICENSE"),
     ("publish/SETUP.public.md", "docs/setup.md"),
     ("CLAUDE.md", None),
     ("docs/*.md", None),
