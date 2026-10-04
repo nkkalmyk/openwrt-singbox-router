@@ -109,12 +109,16 @@ providers_ok() {
 # Заставить группы urltest уйти с мёртвой ноды сейчас, а не через интервал проверки:
 # проверка выбранной ноды отдельно стирает её историю при неудаче, затем проверка группы
 # тестирует ноды без свежей истории и выбирает лучшую живую.
+# kick_groups strict — нода должна не ответить два раза подряд (для ранней реакции: не переключать
+# ноду, а с ней и все соединения, из-за разового сбоя).
 kick_groups() {
-    local g now
+    local g now enc
     for g in auto gemini-auto; do
         now=$(sb_api "/proxies/$g" | jsonfilter -e '@.now' 2>/dev/null)
         [ -n "$now" ] || continue
-        node_alive "$(printf '%s' "$now" | jq -sRr @uri)" && continue
+        enc=$(printf '%s' "$now" | jq -sRr @uri)
+        node_alive "$enc" && continue
+        [ "$1" = strict ] && node_alive "$enc" && continue
         sb_api "/group/$g/delay?url=$SB_TEST_URL_ENC&timeout=5000" 30 >/dev/null
     done
 }

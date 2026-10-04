@@ -1,8 +1,8 @@
 
 config system
 	option hostname 'OpenWrt'
-	option timezone 'GMT0'
-	option zonename 'UTC'
+	option timezone 'MSK-3'
+	option zonename 'Europe/Moscow'
 	option ttylogin '0'
 	option log_size '128'
 	option urandom_seed '0'

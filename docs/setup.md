@@ -432,7 +432,16 @@ curl -s --interface "$W" https://1.1.1.1/cdn-cgi/trace | grep -E '^(ip|loc)='  #
 | `30 5 * * 0` | `router-backup.sh` — полный бэкап в `/root/backups` (хранит 2) |
 | `*/2 * * * *` | `ts-watchdog.sh` — сторож Tailscale |
 
-Без Tailscale убери его строку: `sed -i '/ts-watchdog/d' /etc/crontabs/root`. Время в cron — UTC.
+Без Tailscale убери его строку: `sed -i '/ts-watchdog/d' /etc/crontabs/root`.
+
+Cron работает по местному времени роутера, а у чистого OpenWrt это UTC. Расписание рассчитано на московское время:
+отчёт в 07:45 и 19:45, бэкап и базы в воскресенье утром. Поставь свой часовой пояс, иначе задачи сдвинутся:
+
+```sh
+uci set system.@system[0].zonename='Europe/Moscow'   # свой: Europe/Berlin, Asia/Almaty…
+uci set system.@system[0].timezone='MSK-3'           # строка TZ для этого пояса (видна в LuCI → System → Timezone)
+uci commit system; /etc/init.d/system reload
+```
 
 ```sh
 /etc/init.d/cron enable; /etc/init.d/cron restart

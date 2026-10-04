@@ -53,7 +53,7 @@ def api(path):
 
 now = time.time()
 since = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - hours * 3600))
-p(f"===== Отчёт роутера {time.strftime('%Y-%m-%d %H:%M')} (UTC), за {hours} ч =====")
+p(f"===== Отчёт роутера {time.strftime('%Y-%m-%d %H:%M %Z')}, за {hours} ч =====")
 
 # --- Сейчас ---
 p("Сейчас:")
