@@ -2,7 +2,7 @@
 # Отчёт о здоровье роутера за последние N часов (по умолчанию 12): то, что агент проверял руками.
 # Источники: /tmp/health.log (раз в 5 мин), /root/events.log (журнал автоматики), Clash API, проверки sb-common.sh.
 # router-report [часы]          — напечатать отчёт
-# router-report --save [часы]   — ещё и дописать в /root/reports.log (cron), а при проблемах — событие в журнал
+# router-report --save [часы]   — ещё и дописать в /root/reports.log (cron), а если что-то не работает сейчас — событие в журнал
 import json, os, re, subprocess, sys, time, urllib.request
 from collections import Counter
 
@@ -126,6 +126,7 @@ if prox:
         warn.append(f"живы только {alive['P2-']} P2-нод (запасной провайдер)")
 else:
     warn.append("Clash API sing-box не отвечает")
+now_count = len(warn)        # всё выше — проблемы прямо сейчас, ниже — что было за период
 
 # --- За период: health.log ---
 try:
@@ -168,21 +169,40 @@ for msg, n in cnt.most_common():
     p(f"    {n:3}× {msg[:110]}")
 if restarts > RESTARTS_MAX:
     warn.append(f"sing-box перезапускался {restarts} раз")
-bad = [l for l in ev if any(k in l for k in BAD_EVENTS) and "Ноды изменились" not in l and "кодом 0" not in l]
+bad = [l for l in ev if any(k in l for k in BAD_EVENTS) and "Ноды изменились" not in l and "кодом 0" not in l
+       and " router-report: " not in l]
 for l in bad[-5:]:
     warn.append(f"событие: {l[:120]}")
 
 # --- Итог ---
-if warn:
-    p("ИТОГ: ЕСТЬ НА ЧТО ПОСМОТРЕТЬ")
-    for w in warn:
+# Сейчас всё работает, а сбои за период уже позади — это не тревога: автоматика справилась.
+now_bad, past = warn[:now_count], warn[now_count:]
+if now_bad:
+    p("ИТОГ: ПРОБЛЕМА СЕЙЧАС")
+    for w in now_bad:
         p(f"  ! {w}")
+elif past:
+    p(f"ИТОГ: сейчас всё работает; за {hours} ч были сбои, автоматика справилась")
 else:
     p("ИТОГ: всё хорошо")
+if past:
+    if now_bad:
+        p(f"  За {hours} ч было:")
+    for w in past:
+        p(f"  ~ {w}")
 for i in info:
     p(f"  · {i}")
 
-text = "\n".join(out)
+# Имена нод — без флагов-эмодзи и хвоста с названием тарифа, как в sb-ping (Termius флаги не рисует).
+FLAGS = re.compile("[\U0001F1E6-\U0001F1FF]")
+def pretty(tag):
+    s = FLAGS.sub("", tag)
+    s = re.sub(r",-?E(?:x(?:t(?:r(?:a)?)?)?)?$", "", s)
+    s = re.sub(r"^(P1|P2)-+", r"\1 ", s)
+    s = s.replace(",-", ", ")
+    s = re.sub(r"--+", "-", s)
+    return s.strip(" ,-")
+text = re.sub(r"\b(?:P1|P2)-[^\s()/]+", lambda m: pretty(m.group(0)), "\n".join(out))
 print(text)
 
 if save:
@@ -196,6 +216,7 @@ if save:
     with open(tmp, "w") as f:
         f.write("\n\n".join(parts) + "\n")
     os.replace(tmp, REPORTS)
-    if warn:
+    # В журнал (его видно в `vpn`) — только то, что не работает прямо сейчас.
+    if now_bad:
         sh(". /usr/lib/sb-common.sh; event router-report " +
-           "'Есть на что посмотреть (подробно: vpn report): " + "; ".join(warn)[:200].replace("'", "") + "'")
+           "'Проблема сейчас (подробно: vpn report): " + "; ".join(now_bad)[:200].replace("'", "") + "'")

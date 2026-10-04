@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import json, sys, urllib.parse, urllib.request, urllib.error
+import json, re, sys, time, calendar, urllib.parse, urllib.request, urllib.error
 
 API = "http://127.0.0.1:9090"
 TEST_URL = "https://www.gstatic.com/generate_204"
@@ -20,6 +20,35 @@ def call(path, data=None, method=None, timeout=10):
     raw = urllib.request.urlopen(req, timeout=timeout).read()
     return json.loads(raw.decode()) if raw else {}
 
+# Имена нод только для показа: без флагов-эмодзи (Termius и др. их не рисуют и сбивают колонки) и без
+# хвоста с названием тарифа (в теге он часто обрезан до 40 символов). Сами теги в конфиге не трогаем — по ним
+# идёт выбор нод (vpn use / vpn gemini работают по номерам).
+FLAGS = re.compile("[\U0001F1E6-\U0001F1FF]")
+TAG = re.compile(r"\b(?:P1|P2)-[^\s()]+")
+
+def pretty(tag):
+    s = FLAGS.sub("", tag)
+    s = re.sub(r",-?E(?:x(?:t(?:r(?:a)?)?)?)?$", "", s)
+    s = re.sub(r"^(P1|P2)-+", r"\1 ", s)
+    s = s.replace(",-", ", ")
+    s = re.sub(r"--+", "-", s)
+    return s.strip(" ,-")
+
+def pretty_text(text):
+    return TAG.sub(lambda m: pretty(m.group(0)), text)
+
+def local_time(stamp):
+    # sing-box пишет время в UTC с наносекундами: 2026-10-04T18:47:10.513694691Z
+    m = re.match(r"(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)", stamp)
+    if not m:
+        return stamp
+    t = calendar.timegm(tuple(int(x) for x in m.groups()) + (0, 0, 0))
+    if not stamp.endswith("Z"):
+        off = re.search(r"([+-])(\d\d):(\d\d)$", stamp)
+        if off:
+            t -= (1 if off.group(1) == "+" else -1) * (int(off.group(2)) * 3600 + int(off.group(3)) * 60)
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t))
+
 def proxies():
     return call("/proxies").get("proxies", {})
 
@@ -39,21 +68,21 @@ def show():
     p = proxies()
     ns = nodes(p)
     stamps = [t for _, _, t in ns if t]
-    last = max(stamps).split('.')[0].replace('T', ' ') if stamps else "нет данных"
+    last = local_time(max(stamps)) if stamps else "нет данных"
     print("=" * 45)
     print(f" Последний опрос: {last}")
     for g in ("proxy", "auto", "gemini-select", "gemini-auto"):
         if g in p:
-            print(f" {g:<14} → {p[g].get('now', '?')}")
+            print(f" {g:<14} → {pretty(p[g].get('now', '?'))}")
     if "proxy" not in p:
         print(" (селектора proxy нет — ручное переключение недоступно)")
     print("=" * 45)
     alive = sorted([n for n in ns if n[1] > 0], key=lambda x: x[1])
     dead = [n for n in ns if n[1] == 0]
     for i, (name, delay, _) in enumerate(alive, 1):
-        print(f" {i:2d}. {delay:4d} ms  {name}")
+        print(f" {i:2d}. {delay:4d} ms  {pretty(name)}")
     for name, _, _ in dead:
-        print(f"  —   ---- ms  {name}")
+        print(f"  —   ---- ms  {pretty(name)}")
     print("=" * 45)
     if "proxy" in p:
         print(" vpn use N — включить ноду №N | vpn auto — автовыбор | vpn test — перепроверить все")
@@ -68,9 +97,9 @@ def test():
         path = "/proxies/" + urllib.parse.quote(name, safe="") + "/delay?" + q
         try:
             r = call(path, timeout=12)
-            print(f" {r.get('delay', 0):4d} ms  {name}")
+            print(f" {r.get('delay', 0):4d} ms  {pretty(name)}")
         except Exception:
-            print(f"  ---- ms  {name}")
+            print(f"  ---- ms  {pretty(name)}")
 
 def switch(target):
     p = proxies()
@@ -87,7 +116,7 @@ def switch(target):
             print("Неверный номер. Сначала: vpn nodes")
             return
     call(f"/proxies/{group}", data={"name": target}, method="PUT")
-    print(f"{group} → {target}")
+    print(f"{group} → {pretty(target)}")
 
 # --- Gemini: своя группа gemini-select (автовыбор gemini-auto или нода P1 вручную; через P2 Gemini не работает) ---
 def gemini_nodes(p):
@@ -102,16 +131,16 @@ def show_gemini():
     now = p["gemini-select"].get("now", "?")
     print("=" * 45)
     if now == "gemini-auto":
-        print(f" Gemini: автовыбор → {p.get('gemini-auto', {}).get('now', '?')}")
+        print(f" Gemini: автовыбор → {pretty(p.get('gemini-auto', {}).get('now', '?'))}")
     else:
-        print(f" Gemini: выбрана вручную → {now}")
+        print(f" Gemini: выбрана вручную → {pretty(now)}")
     print("=" * 45)
     ns = gemini_nodes(p)
     alive = sorted([n for n in ns if n[1] > 0], key=lambda x: x[1])
     for i, (name, delay, _) in enumerate(alive, 1):
-        print(f" {i:2d}. {delay:4d} ms  {name}")
+        print(f" {i:2d}. {delay:4d} ms  {pretty(name)}")
     for name, _, _ in [n for n in ns if n[1] == 0]:
-        print(f"  —   ---- ms  {name}")
+        print(f"  —   ---- ms  {pretty(name)}")
     print("=" * 45)
     print(" vpn gemini N — включить ноду №N для Gemini | vpn gemini auto — автовыбор")
 
@@ -130,7 +159,7 @@ def switch_gemini(target):
             print("Неверный номер. Сначала: vpn gemini")
             return
     call("/proxies/gemini-select", data={"name": name}, method="PUT")
-    print(f"Gemini → {'автовыбор' if name == 'gemini-auto' else name}")
+    print(f"Gemini → {'автовыбор' if name == 'gemini-auto' else pretty(name)}")
 
 # --- Ручные списки маршрутизации (sing-box подхватывает правку файла без перезапуска) ---
 import ipaddress, os, subprocess
@@ -213,11 +242,16 @@ def show_events(n):
         lines = open(EVENTS, encoding="utf-8").read().splitlines()
     except FileNotFoundError:
         lines = []
-    print("\n".join(lines[-n:]) if lines else "Событий пока нет — автоматике не приходилось вмешиваться.")
+    print(pretty_text("\n".join(lines[-n:])) if lines else "Событий пока нет — автоматике не приходилось вмешиваться.")
 
 try:
     cmd = sys.argv[1] if len(sys.argv) > 1 else "show"
-    if cmd == "test":
+    if cmd == "pretty":
+        # Фильтр для других скриптов (vpn): убрать флаги из имён нод в тексте со stdin.
+        for line in sys.stdin:
+            sys.stdout.write(pretty_text(line))
+            sys.stdout.flush()
+    elif cmd == "test":
         test()
     elif cmd == "auto":
         switch("auto")
