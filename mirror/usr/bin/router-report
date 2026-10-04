@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+# Отчёт о здоровье роутера за последние N часов (по умолчанию 12): то, что агент проверял руками.
+# Источники: /tmp/health.log (раз в 5 мин), /root/events.log (журнал автоматики), Clash API, проверки sb-common.sh.
+# router-report [часы]          — напечатать отчёт
+# router-report --save [часы]   — ещё и дописать в /root/reports.log (cron), а при проблемах — событие в журнал
+import json, os, re, subprocess, sys, time, urllib.request
+from collections import Counter
+
+REPORTS = "/root/reports.log"
+REPORTS_KEEP = 14            # отчётов в файле (неделя при двух в день)
+EVENTS = "/root/events.log"
+HEALTH = "/tmp/health.log"
+API = "http://127.0.0.1:9090"
+
+# Пороги «есть на что посмотреть»
+VPN_FAIL_MAX = 6             # проверок VPN с ошибкой (каждая = 5 мин) за период; короткие ночные провалы бывают
+VPN_RUN_MAX = 3              # или столько подряд (≥15 мин без VPN) — автоматика не справилась
+DIRECT_FAIL_MAX = 3
+SB_MEM_MAX = 35              # MB своей памяти sing-box (лимит 45)
+MEMAVAIL_MIN = 40            # MB свободной памяти роутера
+BL_ALIVE_MIN = 5
+VP_ALIVE_MIN = 3
+OVERLAY_MAX = 85             # % занятости /overlay
+RESTARTS_MAX = 16            # перезапусков sing-box за период (обычно 3–10 за 12 ч из-за смены адресов у P1)
+BAD_EVENTS = ("НЕВАЛИДН", "откат", "network restart", "Перезагружаю", "не запущен", "не поднялись",
+              "требует входа", "не в строю", "flowtable", "Мертвы все ноды", "Конфиг невалиден",
+              "завершился с кодом", "перезапускаю sing-box", "обновляю подписки")
+
+args = [a for a in sys.argv[1:] if a != "--save"]
+save = "--save" in sys.argv
+hours = int(args[0]) if args and args[0].isdigit() else 12
+
+warn, info, out = [], [], []
+p = out.append
+
+def sh(cmd, timeout=30):
+    try:
+        return subprocess.run(["sh", "-c", cmd], capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return None
+
+def check(name):
+    r = sh(". /usr/lib/sb-common.sh; " + name)
+    return r is not None and r.returncode == 0
+
+def api(path):
+    try:
+        secret = open("/etc/sing-box/.clash-secret").read().strip()
+        req = urllib.request.Request(API + path, headers={"Authorization": "Bearer " + secret})
+        return json.loads(urllib.request.urlopen(req, timeout=10).read().decode())
+    except Exception:
+        return None
+
+now = time.time()
+since = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - hours * 3600))
+p(f"===== Отчёт роутера {time.strftime('%Y-%m-%d %H:%M')} (UTC), за {hours} ч =====")
+
+# --- Сейчас ---
+p("Сейчас:")
+for name, title in (("direct_ok", "интернет провайдера"), ("tunnel_ok", "VPN"), ("routing_ok", "маршрутизация")):
+    ok = check(name)
+    p(f"  {title:22} {'OK' if ok else 'НЕТ'}")
+    if not ok:
+        warn.append(f"сейчас не работает: {title}")
+
+ts = sh("curl -s -m 5 --unix-socket /var/run/tailscale/tailscaled.sock "
+        "http://local-tailscaled.sock/localapi/v0/status")
+tsj = {}
+try:
+    tsj = json.loads(ts.stdout) if ts else {}
+except Exception:
+    pass
+backend = tsj.get("BackendState", "не отвечает")
+p(f"  {'Tailscale':22} {backend}")
+if backend != "Running":
+    warn.append(f"Tailscale: {backend}")
+allowed = (tsj.get("Self") or {}).get("AllowedIPs") or []
+if "0.0.0.0/0" not in allowed:
+    info.append("exit node роутера не одобрен в админке Tailscale")
+
+pid = sh("pidof sing-box")
+pid = pid.stdout.split()[0] if pid and pid.stdout.strip() else None
+if pid:
+    st = open(f"/proc/{pid}/status").read()
+    rss = int(re.search(r"RssAnon:\s+(\d+)", st).group(1)) // 1024
+    up = int(time.time() - os.stat(f"/proc/{pid}").st_mtime)
+    p(f"  {'sing-box':22} работает {up // 3600} ч {up % 3600 // 60} мин, память {rss} MB")
+else:
+    p(f"  {'sing-box':22} НЕ ЗАПУЩЕН")
+    warn.append("sing-box не запущен")
+
+memavail = int(re.search(r"MemAvailable:\s+(\d+)", open("/proc/meminfo").read()).group(1)) // 1024
+p(f"  {'свободная память':22} {memavail} MB")
+r = sh("df /overlay | tail -1")
+try:
+    overlay = int(r.stdout.split()[4].rstrip("%"))
+    p(f"  {'/overlay занят':22} {overlay} %")
+    if overlay > OVERLAY_MAX:
+        warn.append(f"/overlay занят на {overlay} %")
+except Exception:
+    pass
+
+# --- Ноды ---
+prox = (api("/proxies") or {}).get("proxies", {})
+alive = Counter(); total = Counter()
+for name, v in prox.items():
+    prefix = name[:3]
+    if prefix not in ("P1-", "P2-"):
+        continue
+    total[prefix] += 1
+    h = v.get("history") or []
+    if h and h[-1].get("delay", 0) > 0:
+        alive[prefix] += 1
+if prox:
+    auto = prox.get("auto", {}).get("now", "?")
+    gem = prox.get("gemini-auto", {}).get("now", "?")
+    p(f"  {'ноды живы':22} P1 {alive['P1-']} из {total['P1-']}, P2 {alive['P2-']} из {total['P2-']}")
+    p(f"  {'auto / Gemini':22} {auto} / {gem}")
+    if prox.get("proxy", {}).get("now") != "auto":
+        info.append(f"VPN-нода выбрана вручную: {prox['proxy'].get('now')}")
+    if prox.get("gemini-select", {}).get("now") != "gemini-auto":
+        info.append(f"нода Gemini выбрана вручную: {prox['gemini-select'].get('now')}")
+    if alive["P1-"] < BL_ALIVE_MIN:
+        warn.append(f"живы только {alive['P1-']} P1-нод (Gemini работает только через P1)")
+    if alive["P2-"] < VP_ALIVE_MIN:
+        warn.append(f"живы только {alive['P2-']} P2-нод (запасной провайдер)")
+else:
+    warn.append("Clash API sing-box не отвечает")
+
+# --- За период: health.log ---
+try:
+    lines = open(HEALTH).read().splitlines()[-hours * 12:]
+except Exception:
+    lines = []
+vpn_fail = [l.split()[0] for l in lines if "proxy=000" in l]
+run = longest = 0
+for l in lines:
+    run = run + 1 if "proxy=000" in l else 0
+    longest = max(longest, run)
+dir_fail = [l.split()[0] for l in lines if "direct=000" in l]
+sbm = [int(m) for l in lines for m in re.findall(r"sb=(\d+)MB", l)]
+mem = [int(m) for l in lines for m in re.findall(r"mem=(\d+)MB", l)]
+p(f"За {hours} ч (проверка раз в 5 мин, {len(lines)} шт.):")
+p(f"  VPN не отвечал        {len(vpn_fail)} раз" + (f": {' '.join(vpn_fail)}" if vpn_fail else ""))
+p(f"  провайдер не отвечал  {len(dir_fail)} раз" + (f": {' '.join(dir_fail)}" if dir_fail else ""))
+if sbm:
+    p(f"  память sing-box       {min(sbm)}–{max(sbm)} MB")
+if mem:
+    p(f"  свободная память      {min(mem)}–{max(mem)} MB")
+if len(vpn_fail) > VPN_FAIL_MAX or longest >= VPN_RUN_MAX:
+    warn.append(f"VPN не отвечал {len(vpn_fail)} проверок (~{len(vpn_fail) * 5} мин), подряд до {longest}")
+if len(dir_fail) > DIRECT_FAIL_MAX:
+    warn.append(f"интернет провайдера пропадал {len(dir_fail)} проверок (~{len(dir_fail) * 5} мин) — это провайдер")
+if sbm and max(sbm) > SB_MEM_MAX:
+    warn.append(f"память sing-box доходила до {max(sbm)} MB")
+if mem and min(mem) < MEMAVAIL_MIN:
+    warn.append(f"свободная память падала до {min(mem)} MB")
+
+# --- За период: журнал автоматики ---
+try:
+    ev = [l for l in open(EVENTS).read().splitlines() if l[:19] >= since]
+except Exception:
+    ev = []
+restarts = sum(1 for l in ev if "перезапускаю sing-box" in l or "Перезапуск (" in l)
+p(f"  событий автоматики    {len(ev)}, перезапусков sing-box {restarts}")
+cnt = Counter(re.sub(r"\d", "#", l[20:]) for l in ev)
+for msg, n in cnt.most_common():
+    p(f"    {n:3}× {msg[:110]}")
+if restarts > RESTARTS_MAX:
+    warn.append(f"sing-box перезапускался {restarts} раз")
+bad = [l for l in ev if any(k in l for k in BAD_EVENTS) and "Ноды изменились" not in l and "кодом 0" not in l]
+for l in bad[-5:]:
+    warn.append(f"событие: {l[:120]}")
+
+# --- Итог ---
+if warn:
+    p("ИТОГ: ЕСТЬ НА ЧТО ПОСМОТРЕТЬ")
+    for w in warn:
+        p(f"  ! {w}")
+else:
+    p("ИТОГ: всё хорошо")
+for i in info:
+    p(f"  · {i}")
+
+text = "\n".join(out)
+print(text)
+
+if save:
+    old = ""
+    try:
+        old = open(REPORTS).read()
+    except Exception:
+        pass
+    parts = [x for x in old.split("\n\n") if x.strip()][-(REPORTS_KEEP - 1):] + [text]
+    tmp = REPORTS + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("\n\n".join(parts) + "\n")
+    os.replace(tmp, REPORTS)
+    if warn:
+        sh(". /usr/lib/sb-common.sh; event router-report " +
+           "'Есть на что посмотреть (подробно: vpn report): " + "; ".join(warn)[:200].replace("'", "") + "'")

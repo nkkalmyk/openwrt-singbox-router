@@ -1,6 +1,7 @@
-7 * * * * /usr/bin/apply-vless.sh
+7,37 * * * * /usr/bin/apply-vless.sh
 */5 * * * * /usr/bin/health.sh
 * * * * * /usr/bin/sb-watchdog.sh
 30 5 * * 0 /usr/bin/router-backup.sh
 0 5 * * 0 /usr/bin/update-rulesets.sh
 */2 * * * * /usr/bin/ts-watchdog.sh
+45 4,16 * * * /usr/bin/router-report --save >/dev/null 2>&1

@@ -47,6 +47,7 @@ FILES="
 /usr/lib/sb-common.sh
 /usr/bin/vpn
 /usr/bin/router-speedtest.sh
+/usr/bin/router-report
 "
 
 echo "Снимаю файлы с $HOST..."

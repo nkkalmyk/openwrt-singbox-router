@@ -55,6 +55,7 @@ vpn lists            — что в списках direct/proxy
 vpn update           — обновить ноды из подписок (перезапуск только если они изменились)
 vpn restart          — безопасно перезапустить sing-box (~6 с без интернета)
 vpn log [N]          — что делала автоматика (журнал переживает перезагрузку)
+vpn report [часы]    — отчёт о здоровье за 12 ч (сам делается в 07:45 и 19:45 мск; прошлые: vpn report all)
 vpn speed            — замер скорости через VPN и напрямую (~1 мин)
 vpn mem              — память и самые прожорливые процессы
 vpn ts               — Tailscale: устройства в сети
@@ -79,6 +80,7 @@ case "$cmd" in
     update)     /usr/bin/apply-vless.sh ;;
     restart)    /usr/bin/sb-restart.sh вручную && echo "Готово." ;;
     log)        sb-ping events "$@" ;;
+    report)     if [ "$1" = all ]; then cat /root/reports.log 2>/dev/null || echo "Отчётов ещё нет."; else /usr/bin/router-report "$@"; fi ;;
     speed)      /usr/bin/router-speedtest.sh ;;
     mem)        /usr/bin/mem ;;
     ts)         tailscale status ;;

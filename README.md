@@ -43,6 +43,7 @@
 | [update-rulesets.sh](mirror/usr/bin/update-rulesets.sh) | Обновляет базы geoip-ru / geosite-category-ru, ставит новую, только если она проверена | cron, раз в неделю |
 | [router-backup.sh](mirror/usr/bin/router-backup.sh) | Полный бэкап `sysupgrade -b`, хранит два | cron, раз в неделю |
 | [router-speedtest.sh](mirror/usr/bin/router-speedtest.sh) | Замер скорости через VPN и напрямую, приём и отдача, загрузка CPU | `vpn speed` |
+| [router-report](mirror/usr/bin/router-report) | Отчёт о здоровье за N часов: текущие проверки, провалы VPN и провайдера, память, журнал событий, итог | cron, 2 раза в день; `vpn report` |
 | [mem](mirror/usr/bin/mem) | Память по процессам: своя (RssAnon) и код (RssFile) | руками |
 | [sb-route-test](mirror/usr/bin/sb-route-test) | Открывает список сайтов и показывает, через какую ноду и по какому правилу ушло каждое соединение | руками |
 
@@ -64,6 +65,7 @@ vpn direct example.ru    # этот сайт всегда напрямую (vpn 
 vpn update               # обновить ноды из подписок (перезапуск, только если они изменились)
 vpn restart              # безопасно перезапустить sing-box (~6 с без интернета)
 vpn log                  # что делала автоматика
+vpn report 24            # отчёт о здоровье за сутки с итогом
 vpn speed                # замер скорости через VPN и напрямую
 ```
 
