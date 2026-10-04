@@ -33,10 +33,18 @@ event() {
 }
 
 # Интернет у провайдера есть: пинг с привязкой к WAN, мимо sing-box и без DNS.
+# Устройство WAN: на AX3000T — wan, на других роутерах бывает eth1, eth0.2, pppoe-wan. Как в update-vless.py.
+wan_dev() {
+    local d
+    d=$(ubus call network.interface.wan status 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
+    echo "${d:-wan}"
+}
+
 direct_ok() {
-    local ip
+    local ip dev
+    dev=$(wan_dev)
     for ip in 77.88.8.8 77.88.8.1 8.8.8.8; do
-        ping -c 1 -W 2 -I wan "$ip" >/dev/null 2>&1 && return 0
+        ping -c 1 -W 2 -I "$dev" "$ip" >/dev/null 2>&1 && return 0
     done
     return 1
 }

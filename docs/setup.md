@@ -63,6 +63,10 @@ ssh router 'chmod 755 /usr/bin/vpn /usr/bin/sb-* /usr/bin/*.sh /usr/bin/*.py /us
 Не копируй целиком `network`, `firewall`, `dhcp` и `system` из `mirror/etc/config/`: там настройки конкретного
 железа. Нужные части — командами в шаге 4.
 
+Скрипты ждут, что **интерфейс WAN в OpenWrt называется `wan`** (так по умолчанию). Само устройство может быть
+любым (`eth1`, `pppoe-wan`): скрипты узнают его через `ubus call network.interface.wan status`. Проверь:
+`ubus call network.interface.wan status | jsonfilter -e '@.l3_device'` должно напечатать имя устройства.
+
 ## 3. Подставить своё
 
 **Подписки** — в начале `/usr/bin/update-vless.py`:
@@ -212,8 +216,32 @@ vpn nodes               # ноды с задержками
 tailscale up --accept-dns=false --advertise-exit-node   # откроет ссылку для входа; один раз
 ```
 
-Зона firewall `tailscale` (интерфейс `tailscale0`) и форварды `tailscale → lan / wan / vpn`, `vpn → tailscale` —
-см. конец `mirror/etc/config/firewall`, добавь так же через `uci`. Трафик самого tailscaled sing-box не трогает:
+Firewall: своя зона для `tailscale0`, вход Tailscale с WAN и форварды (через дом — и в LAN, и наружу, и в VPN):
+
+```sh
+uci set firewall.tailscale=zone
+uci set firewall.tailscale.name='tailscale'
+uci set firewall.tailscale.input='ACCEPT'
+uci set firewall.tailscale.output='ACCEPT'
+uci set firewall.tailscale.forward='ACCEPT'
+uci set firewall.tailscale.mtu_fix='1'
+uci add_list firewall.tailscale.device='tailscale0'
+for pair in tailscale:lan tailscale:wan tailscale:vpn vpn:tailscale; do
+    s=${pair%%:*} d=${pair##*:}
+    uci set firewall.fw_${s}_${d}=forwarding
+    uci set firewall.fw_${s}_${d}.src="$s"
+    uci set firewall.fw_${s}_${d}.dest="$d"
+done
+uci set firewall.ts_in=rule
+uci set firewall.ts_in.name='Allow-Tailscale-In'
+uci set firewall.ts_in.src='wan'
+uci set firewall.ts_in.proto='udp'
+uci set firewall.ts_in.dest_port='41641'
+uci set firewall.ts_in.target='ACCEPT'
+uci commit firewall; fw4 reload
+```
+
+Трафик самого tailscaled sing-box не трогает:
 Tailscale метит его fwmark и отправляет мимо туннеля, поэтому удалённый доступ переживает падения sing-box.
 Дальше настройки менять только `tailscale set …`; `tailscale up --reset` и перезапуски при загрузке не нужны.
 Exit node заработает после одобрения в админке Tailscale (Machines → роутер → Edit route settings).
@@ -228,6 +256,21 @@ Exit node заработает после одобрения в админке T
   `update-vless.py` (`DIRECT_DNS`);
 - `sb-common.sh`: `direct_ok` пингует 77.88.8.8 / 77.88.8.1 / 8.8.8.8 через WAN; `tunnel_ok` считает, что VPN
   работает, если Cloudflare trace показывает `loc` не `RU`, — впиши код своей страны.
+
+## Если не заработало
+
+Сначала `vpn` — он показывает те же проверки, что и автоматика. Потом по строке, которая не OK:
+
+| Что видно | Что проверить |
+|---|---|
+| «Интернет провайдера» не OK, хотя сайты напрямую открываются | `ubus call network.interface.wan status \| jsonfilter -e '@.l3_device'` — интерфейс должен называться `wan` (шаг 2) |
+| `update-vless.py` пишет ошибку или 0 нод | `curl -s ССЫЛКА \| head -c 300` — отдаётся ли список; не отсеяли ли все ноды списки слов (шаг 3); транспорт нод — только TCP (`type=tcp`), `security=reality` или `tls` |
+| `sing-box check` ругается | текст ошибки называет поле; частое — оставшийся `CHANGE_ME`, пустая группа (удалил ноды, а группу нет), rule-set без файла (запусти `update-rulesets.sh`) |
+| `apply-vless.sh` откатился («связи нет») | `logread -e sing-box \| tail -20`; `vpn nodes` — живы ли ноды. Ноды мертвы — проблема подписки или провайдера, а не роутера |
+| VPN OK, но у устройств в LAN нет интернета | есть ли `tun0` во flowtable: `nft list flowtable inet fw4 ft`; нет — `fw4 reload`; зона `vpn` и форвард `lan → vpn` (шаг 4) |
+| сайты не открываются по имени, по IP открываются | `nslookup ya.ru 127.0.0.1` и `nslookup ya.ru 127.0.0.1 -port=5300`; список серверов dnsmasq (шаг 4) |
+| всё через VPN, даже российское | `vpn site ya.ru` покажет правило; нет файлов `geoip-ru.srs` / `geosite-category-ru.srs` — `update-rulesets.sh` |
+| что делала автоматика | `vpn log` (постоянный журнал), `vpn report 24` |
 
 ## Частые грабли
 
