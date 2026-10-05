@@ -123,7 +123,7 @@ Clash API: `127.0.0.1:9090`, секрет в `/etc/sing-box/.clash-secret` (им
 | `*/2 * * * *` | `ts-watchdog.sh` | сторож Tailscale (см. раздел Tailscale) |
 | служба `router-bot` | `router-notify --bot` | команды из Telegram (`/status`, `/nodes`, `/restart`…), только от своего чата; см. runbook |
 | `58 * * * *` | `uptime-hourly` | почасовая сводка проверок из `/tmp/health.log` в `/root/uptime.log` (31 день) для `vpn day` |
-| `* * * * *` | `router-notify` | уведомления в Telegram: VPN не работает 10+ мин и когда вернулся; интернета у провайдера не было 5+ мин; перезагрузка роутера; важные события из events.log. Не ушло — очередь `/root/.notify/queue`. Без `/etc/router-notify.conf` сразу выходит |
+| `* * * * *` | `router-notify` | уведомления в Telegram (и «пульс» во внешний сервис, раз в 5 мин, если настроен `vpn tg pulse`): VPN не работает 10+ мин и когда вернулся; интернета у провайдера не было 5+ мин; перезагрузка роутера; важные события из events.log. Не ушло — очередь `/root/.notify/queue`. Без `/etc/router-notify.conf` сразу выходит |
 | `45 7,19 * * *` | `router-report --save` | отчёт о здоровье за 12 ч (07:45 и 19:45) в `/root/reports.log` (хранит 14); при проблемах — событие в журнал. Пороги — в начале скрипта |
 
 **update-vless.py** (вызывается из apply-vless.sh; коды выхода: 0 изменено, 2 без изменений, 1 ошибка):

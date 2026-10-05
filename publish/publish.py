@@ -144,7 +144,15 @@ def drop_dhcp_hosts(text):
     return re.sub(r"\nconfig host\n(?:[ \t]+[^\n]*\n?)*", "\n", text)
 
 
+def drop_third_party(text):
+    """CLAUDE.md: в конце приватной копии стоит чужой текст (общие правила поведения агента, лицензия не проверена) —
+    он начинается со второго заголовка «# CLAUDE.md». В публичную копию не попадает."""
+    head, sep, _ = text.partition("\n# CLAUDE.md\n")
+    return head.rstrip("\n").rstrip("-").rstrip("\n") + "\n" if sep else text
+
+
 SPECIAL = [
+    (r"^CLAUDE\.md$", drop_third_party),
     (r"mirror/etc/sing-box/config\.json$", sanitize_singbox),
     (r"mirror/etc/sing-box/rule-set/my-[^/]*\.json$", placeholder_ruleset),
     (r"mirror/etc/config/dhcp$", drop_dhcp_hosts),

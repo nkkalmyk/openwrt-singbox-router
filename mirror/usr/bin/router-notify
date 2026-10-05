@@ -10,6 +10,7 @@
 #   router-notify --test     — отправить проверочное сообщение (vpn tg test)
 #   router-notify --status   — подключён ли, сколько сообщений ждёт (vpn tg)
 #   router-notify --bot      — принимать команды из Telegram (служба /etc/init.d/router-bot)
+#   router-notify --pulse [off] — подключить «пульс»: внешний сервис следит, что роутер жив (vpn tg pulse)
 # Токен бота и chat id — в /etc/router-notify.conf (секрет: не печатать, не класть в mirror/ и publish).
 . /usr/lib/sb-common.sh
 CONF=/etc/router-notify.conf
@@ -22,7 +23,7 @@ QUEUE_KEEP=30
 # Какие события автоматики пересылать (остальные — обычная работа: смена адресов, перетест нод и т. п.)
 IMPORTANT='НЕВАЛИДН|откат|Перезагружаю|network restart|Мертвы все ноды|требует входа|не в строю|Конфиг невалиден|не поднялись|не запущен|Проблема сейчас'
 
-TG_TOKEN='' TG_CHAT='' TG_ENABLED=1
+TG_TOKEN='' TG_CHAT='' TG_ENABLED=1 HC_URL=''
 [ -f "$CONF" ] && . "$CONF"
 
 api() {   # api <метод> [curl -d …] — сначала обычным путём (через VPN), не вышло — напрямую через провайдера
@@ -286,7 +287,50 @@ bot() {
     done
 }
 
+# ---------- «Пульс»: роутер раз в 5 минут пингует внешний сервис (healthchecks.io, бесплатно) ----------
+# Пропал пульс — сервис сам пишет владельцу. Так видно то, о чём роутер сам сообщить не может: он выключен, завис или
+# без питания. Пинг идёт напрямую через провайдера, мимо VPN: сбой VPN не должен выглядеть как «роутер умер».
+# Адрес пинга — секрет (по нему кто угодно может слать пульсы): хранится в /etc/router-notify.conf (HC_URL).
+pulse() {
+    local host ip
+    host=${HC_URL#*://}; host=${host%%/*}
+    ip=$(nslookup "$host" 77.88.8.8 2>/dev/null | awk '/^Address/ && $NF !~ /:/ {a = $NF} END {print a}')
+    { [ -n "$ip" ] && curl -sf -m 10 -o /dev/null --interface "$(wan_dev)" --resolve "$host:443:$ip" "$HC_URL"; } \
+        || curl -sf -m 10 -o /dev/null "$HC_URL"
+}
+
+pulse_setup() {
+    local url
+    if [ "$1" = off ]; then
+        [ -f "$CONF" ] && sed -i '/^HC_URL=/d' "$CONF"
+        echo "Пульс выключен. Проверку на healthchecks.io можно удалить."
+        return
+    fi
+    echo "Пульс: внешний сервис следит, что роутер жив, и сам пишет тебе, если он пропал (выключен, завис, нет питания)."
+    echo
+    echo "1. Зарегистрируйся на https://healthchecks.io (бесплатно) и создай проверку (Add Check):"
+    echo "   Period — 5 minutes, Grace Time — 5 minutes."
+    echo "2. Во вкладке Integrations подключи, куда писать: Telegram или Email."
+    echo "3. На странице проверки скопируй Ping URL (https://hc-ping.com/…)."
+    printf "   Вставь его сюда и нажми Enter: "
+    read -r url
+    url=$(printf '%s' "$url" | tr -d ' \r')
+    case "$url" in https://*/*) ;; *) echo "   Это не похоже на адрес пинга (нужен https://hc-ping.com/…). Запусти ещё раз: vpn tg pulse"; exit 1 ;; esac
+    case "$url" in *[!A-Za-z0-9./:_-]*) echo "   В адресе странные символы. Запусти ещё раз: vpn tg pulse"; exit 1 ;; esac
+    HC_URL=$url
+    if ! pulse; then
+        echo "   Пинг не дошёл (адрес неверный или нет связи). Ничего не сохранил. Проверь адрес: vpn tg pulse"
+        exit 1
+    fi
+    umask 077
+    [ -f "$CONF" ] && sed -i '/^HC_URL=/d' "$CONF"
+    printf "HC_URL='%s'\n" "$HC_URL" >> "$CONF"
+    chmod 600 "$CONF"
+    echo "   Готово: первый пульс отправлен, на healthchecks.io проверка станет зелёной. Дальше пульс идёт раз в 5 минут."
+}
+
 case "$1" in
+    --pulse) pulse_setup "$2"; exit ;;
     --bot) bot; exit ;;
     --setup) setup; exit ;;
     --test)
@@ -294,6 +338,8 @@ case "$1" in
         send "🔔 Проверка: роутер на связи, $(date '+%d.%m %H:%M')." && echo "Отправлено." || { echo "Не отправилось."; exit 1; }
         exit ;;
     --status)
+        if [ -n "$HC_URL" ]; then echo "Пульс (healthchecks.io): включён, раз в 5 мин (выключить: vpn tg pulse off)"
+        else echo "Пульс (healthchecks.io): не настроен — подключить: vpn tg pulse"; fi
         if [ -z "$TG_TOKEN" ]; then echo "Уведомления в Telegram не настроены. Подключить: vpn tg setup"
         else
             [ "$TG_ENABLED" = 0 ] && echo "Уведомления в Telegram: выключены (включить: vpn tg on)" \
@@ -312,6 +358,8 @@ case "$1" in
         exit ;;
 esac
 
+# Пульс не зависит от Telegram: идёт и без него, и при выключенных уведомлениях.
+[ -n "$HC_URL" ] && [ $(( $(date +%s) / 60 % 5 )) -eq 0 ] && pulse
 [ -n "$TG_TOKEN" ] && [ -n "$TG_CHAT" ] && [ "$TG_ENABLED" != 0 ] || exit 0
 # Предыдущий запуск ещё отправляет (Telegram недоступен — до 30 с на попытку) — не дублируем.
 exec 8>/tmp/router-notify.lock

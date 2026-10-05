@@ -51,7 +51,7 @@ Tailscale-трафик роутера идёт **мимо sing-box** (fwmark 0x8
    теги нод из подписок не трогать. Для показа (`vpn`, `sb-ping`, отчёт) имена чистятся: без флагов-эмодзи и хвоста с названием тарифа
    (`pretty()` в sb-ping, фильтр `sb-ping pretty`); в конфиге и API теги прежние.
 7. **Секреты.** В `mirror/` и `backups/` лежат ссылки подписок, UUID нод, ключи. Никуда не публиковать,
-   не пушить, не печатать в чат ссылки подписок, `.clash-secret` и токен бота из `/etc/router-notify.conf`
+   не пушить, не печатать в чат ссылки подписок, `.clash-secret`, токен бота и адрес пульса из `/etc/router-notify.conf`
    (этот файл не снимается в mirror/ — так и оставить). Публичная копия на GitHub обновляется
    только через `python3 publish/publish.py --push` — руками в `.public/` ничего не класть.
 8. **busybox:** нет `nohup`, `diff`, `install`, `find -delete`, `flock -w` → фоновый запуск через
@@ -115,84 +115,21 @@ ssh openwrt-ts 'logread -e sb-watchdog -e apply-vless -e sb-restart | tail -20'
 
 ## Отложенные идеи (пользователь просил запомнить, 2026-10-04; делать, когда сам попросит)
 
-1. **Внешний «пульс» (healthchecks.io, бесплатно):** роутер отмечается раз в 5 мин; пропали отметки (умер
-   роутер, питание или интернет) → сервис сам пишет пользователю. Дополняет уведомления в Telegram (`router-notify`): мёртвый роутер сам не напишет.
-2. **Wi-Fi: код страны RU** (сейчас `country 00`): `uci set wireless.radio0.country=RU` и то же для radio1, затем
+0. **«Пульс»** (healthchecks.io) — код готов и стоит на роутере, ждёт, пока пользователь сам подключит (`vpn tg pulse`).
+
+1. **Wi-Fi: код страны RU** (сейчас `country 00`): `uci set wireless.radio0.country=RU` и то же для radio1, затем
    `wifi reload`, все клиенты отключатся на 10–20 с. Каналы не трогать: 13-й на 2.4 ГГц и 48-й на 5 ГГц выбраны
    удачно (осмотр в history.md, 2026-10-04 ~22:05).
-3. **ping мимо VPN + лог побольше:** правило sing-box для ICMP → `direct` (проверить, что 1.13 его понимает:
-   `sing-box check` на копии) — заработает ping до зарубежных адресов и пропадёт спам «icmp is not supported»
-   в logread. Плюс `system.log_size` 128 → ~512 KB, чтобы лог хранил около суток. Применение — `apply-vless.sh --force`.
-4. **Обновление OpenWrt** до свежего 25.12.x целиком (sysupgrade с сохранением настроек), а не `apk upgrade` по пакетам.
+2. **ping мимо VPN, правило sing-box для ICMP → `direct`** — решение пользователя ждёт (2026-10-05). Лог уже увеличен
+   (`system.log_size=1024`). Ping с устройств на зарубежные адреса **не «не работает»**: sing-box сам отвечает на него
+   за ~3 мс, это ненастоящий ответ (отсюда и спам «icmp is not supported by default outbound: proxy» в logread).
+   С правилом ping покажет настоящую задержку напрямую (не через VPN), спам пропадёт; но заблокированные у провайдера адреса будут
+   давать потери, хотя через VPN сайт открывается, — это сбивает с толку. Проверить `sing-box check` на копии; применение —
+   `apply-vless.sh --force`.
+3. **Обновление OpenWrt** до свежего 25.12.x целиком (sysupgrade с сохранением настроек), а не `apk upgrade` по пакетам.
    Ночью, с бэкапом и планом отката; после — заново поставить пакеты (список в `mirror/etc/apk/world`)
    и проверить по runbook.
 - Пользователю подсказано (делает сам, на устройствах): на телефонах и ноутбуках «забыть» `WIFI_2G`, чтобы они не
   прыгали между двумя сетями. 2.4 ГГц оставить лампочке и часам.
 
 После заметных изменений на роутере: обнови `docs/` (особенно history.md) и сними `./scripts/pull-from-router.sh`.
-
-# CLAUDE.md
-
-Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
-
-**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
-
-## 1. Think Before Coding
-
-**Don't assume. Don't hide confusion. Surface tradeoffs.**
-
-Before implementing:
-- State your assumptions explicitly. If uncertain, ask.
-- If multiple interpretations exist, present them - don't pick silently.
-- If a simpler approach exists, say so. Push back when warranted.
-- If something is unclear, stop. Name what's confusing. Ask.
-
-## 2. Simplicity First
-
-**Minimum code that solves the problem. Nothing speculative.**
-
-- No features beyond what was asked.
-- No abstractions for single-use code.
-- No "flexibility" or "configurability" that wasn't requested.
-- No error handling for impossible scenarios.
-- If you write 200 lines and it could be 50, rewrite it.
-
-Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
-
-## 3. Surgical Changes
-
-**Touch only what you must. Clean up only your own mess.**
-
-When editing existing code:
-- Don't "improve" adjacent code, comments, or formatting.
-- Don't refactor things that aren't broken.
-- Match existing style, even if you'd do it differently.
-- If you notice unrelated dead code, mention it - don't delete it.
-
-When your changes create orphans:
-- Remove imports/variables/functions that YOUR changes made unused.
-- Don't remove pre-existing dead code unless asked.
-
-The test: Every changed line should trace directly to the user's request.
-
-## 4. Goal-Driven Execution
-
-**Define success criteria. Loop until verified.**
-
-Transform tasks into verifiable goals:
-- "Add validation" → "Write tests for invalid inputs, then make them pass"
-- "Fix the bug" → "Write a test that reproduces it, then make it pass"
-- "Refactor X" → "Ensure tests pass before and after"
-
-For multi-step tasks, state a brief plan:
-```
-1. [Step] → verify: [check]
-2. [Step] → verify: [check]
-3. [Step] → verify: [check]
-```
-
-Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
-
----
-
-**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.

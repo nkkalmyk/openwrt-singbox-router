@@ -69,6 +69,7 @@ vpn report [часы]    — отчёт о здоровье за 12 ч (сам �
 vpn speed            — замер скорости через VPN и напрямую (~1 мин)
 vpn tg setup         — подключить уведомления в Telegram (роутер пишет, только если что-то сломалось/починилось)
 vpn tg               — включены ли уведомления    vpn tg test — проверочное сообщение    vpn tg off / on
+vpn tg pulse         — «пульс»: внешний сервис пишет тебе, если роутер выключился или завис (vpn tg pulse off — выключить)
 vpn mem              — память и самые прожорливые процессы
 vpn ts               — Tailscale: устройства в сети
 Сайт можно писать как домен (ozon.ru), IP/подсеть или ссылку. Весь роутер перезагрузить — reboot.
@@ -97,6 +98,7 @@ case "$cmd" in
     speed)      /usr/bin/router-speedtest.sh ;;
     tg)         case "$1" in
                     setup|test|on|off) /usr/bin/router-notify "--$1" ;;
+                    pulse) /usr/bin/router-notify --pulse "$2" ;;
                     *) /usr/bin/router-notify --status ;;
                 esac ;;
     mem)        /usr/bin/mem ;;
