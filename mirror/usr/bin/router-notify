@@ -287,10 +287,10 @@ bot() {
     done
 }
 
-# ---------- «Пульс»: роутер раз в 5 минут пингует внешний сервис (healthchecks.io, бесплатно) ----------
+# ---------- «Пульс»: роутер раз в 5 минут пингует внешний сервис (Cronitor, healthchecks.io — любой, что даёт адрес https://…) ----------
 # Пропал пульс — сервис сам пишет владельцу. Так видно то, о чём роутер сам сообщить не может: он выключен, завис или
 # без питания. Пинг идёт напрямую через провайдера, мимо VPN: сбой VPN не должен выглядеть как «роутер умер».
-# Адрес пинга — секрет (по нему кто угодно может слать пульсы): хранится в /etc/router-notify.conf (HC_URL).
+# Адрес пульса — секрет (по нему кто угодно может слать пульсы): хранится в /etc/router-notify.conf (HC_URL).
 pulse() {
     local host ip
     host=${HC_URL#*://}; host=${host%%/*}
@@ -303,19 +303,21 @@ pulse_setup() {
     local url
     if [ "$1" = off ]; then
         [ -f "$CONF" ] && sed -i '/^HC_URL=/d' "$CONF"
-        echo "Пульс выключен. Проверку на healthchecks.io можно удалить."
+        echo "Пульс выключен. Монитор на стороне сервиса можно удалить, иначе он будет слать тревогу."
         return
     fi
     echo "Пульс: внешний сервис следит, что роутер жив, и сам пишет тебе, если он пропал (выключен, завис, нет питания)."
+    echo "Подойдёт любой сервис, который даёт адрес для проверки «пульса» (heartbeat). Проверено по документации: Cronitor."
     echo
-    echo "1. Зарегистрируйся на https://healthchecks.io (бесплатно) и создай проверку (Add Check):"
-    echo "   Period — 5 minutes, Grace Time — 5 minutes."
-    echo "2. Во вкладке Integrations подключи, куда писать: Telegram или Email."
-    echo "3. На странице проверки скопируй Ping URL (https://hc-ping.com/…)."
+    echo "1. Зарегистрируйся на https://cronitor.io (можно через Google или GitHub; бесплатный план) и создай монитор типа Heartbeat:"
+    echo "   ожидаемый интервал — every 5 minutes, grace (запас) — 5 minutes. Запомни его ключ (key)."
+    echo "2. В Settings → Integrations подключи Telegram (напиши /start@CronitorBot) или почту и добавь их в этот монитор."
+    echo "3. Адрес пульса: https://cronitor.link/p/<твой API key>/<ключ монитора>  (API key — в Settings)."
+    echo "   У другого сервиса (healthchecks.io, Better Stack…) — адрес, который он называет Ping / Heartbeat URL."
     printf "   Вставь его сюда и нажми Enter: "
     read -r url
     url=$(printf '%s' "$url" | tr -d ' \r')
-    case "$url" in https://*/*) ;; *) echo "   Это не похоже на адрес пинга (нужен https://hc-ping.com/…). Запусти ещё раз: vpn tg pulse"; exit 1 ;; esac
+    case "$url" in https://*/*) ;; *) echo "   Это не похоже на адрес пульса (нужен вид https://…/…). Запусти ещё раз: vpn tg pulse"; exit 1 ;; esac
     case "$url" in *[!A-Za-z0-9./:_-]*) echo "   В адресе странные символы. Запусти ещё раз: vpn tg pulse"; exit 1 ;; esac
     HC_URL=$url
     if ! pulse; then
@@ -326,7 +328,7 @@ pulse_setup() {
     [ -f "$CONF" ] && sed -i '/^HC_URL=/d' "$CONF"
     printf "HC_URL='%s'\n" "$HC_URL" >> "$CONF"
     chmod 600 "$CONF"
-    echo "   Готово: первый пульс отправлен, на healthchecks.io проверка станет зелёной. Дальше пульс идёт раз в 5 минут."
+    echo "   Готово: первый пульс отправлен, монитор у сервиса станет зелёным. Дальше пульс идёт раз в 5 минут."
 }
 
 case "$1" in
@@ -338,8 +340,8 @@ case "$1" in
         send "🔔 Проверка: роутер на связи, $(date '+%d.%m %H:%M')." && echo "Отправлено." || { echo "Не отправилось."; exit 1; }
         exit ;;
     --status)
-        if [ -n "$HC_URL" ]; then echo "Пульс (healthchecks.io): включён, раз в 5 мин (выключить: vpn tg pulse off)"
-        else echo "Пульс (healthchecks.io): не настроен — подключить: vpn tg pulse"; fi
+        if [ -n "$HC_URL" ]; then echo "Пульс (внешний сервис): включён, раз в 5 мин (выключить: vpn tg pulse off)"
+        else echo "Пульс (внешний сервис): не настроен — подключить: vpn tg pulse"; fi
         if [ -z "$TG_TOKEN" ]; then echo "Уведомления в Telegram не настроены. Подключить: vpn tg setup"
         else
             [ "$TG_ENABLED" = 0 ] && echo "Уведомления в Telegram: выключены (включить: vpn tg on)" \
