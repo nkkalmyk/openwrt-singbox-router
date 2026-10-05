@@ -139,6 +139,7 @@ config rule
 	option src_ip 'UPSTREAM_NET/24'
 	option dest 'lan'
 	option target 'ACCEPT'
+	option dest_ip 'LAN_DEVICE_IP'
 
 config rule
 	option name 'Block-WAN-SSH'

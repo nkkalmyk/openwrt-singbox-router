@@ -1,12 +1,11 @@
 apk-mbedtls
 attendedsysupgrade-common
-avahi-daemon
-base-files=1699~f505120278
+avahi-dbus-daemon
+base-files=1711~f5dae5ece4
 busybox
 ca-bundle
 cgi-io
 curl
-dnsmasq
 dnsmasq-full
 dropbear
 eip197-mini-firmware
@@ -25,7 +24,7 @@ jansson4
 jq
 jshn
 jsonfilter
-kernel=6.12.74~60d938adcb727697d3015e4285d4c290-r1
+kernel=6.12.94~5a6c1f71be683ae9980b15d3ce73e24d-r1
 kmod-crypto-aead
 kmod-crypto-authenc
 kmod-crypto-crc32c

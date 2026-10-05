@@ -5,6 +5,7 @@
 # Хранятся только два последних архива.
 DIR=/root/backups
 KEEP=2
+umask 077  # в архиве пароли, ключи и токены — читать только root
 
 mkdir -p "$DIR"
 F="$DIR/router-$(date +%Y%m%d-%H%M).tar.gz"

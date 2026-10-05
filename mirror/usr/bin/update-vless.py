@@ -131,6 +131,8 @@ def fetch_direct(url):
             body, _, meta = result.stdout.rpartition(b"\n")
             code, _, location = meta.decode(errors="ignore").partition(" ")
             if code.startswith("3") and location:
+                if urllib.parse.urlsplit(location).scheme != "https":
+                    raise RuntimeError("напрямую: редирект не на https — не иду")
                 url = location
                 continue
             if code != "200":
@@ -185,7 +187,7 @@ def build_outbound(prefix, rec, tags_seen):
     return outbound
 
 def collect(text, prefix, exclude_kw, require_kw, tags_seen):
-    result, skipped = [], 0
+    result, skipped, bad_server = [], 0, 0
     for line in text.splitlines():
         rec = parse_line(line.strip())
         if not rec:
@@ -198,10 +200,28 @@ def collect(text, prefix, exclude_kw, require_kw, tags_seen):
         if rec["type"] not in SUPPORTED_TRANSPORTS or rec["security"] not in SUPPORTED_SECURITY:
             skipped += 1
             continue
+        if not valid_server(rec["server"]):
+            bad_server += 1
+            continue
         result.append(build_outbound(prefix, rec, tags_seen))
     if skipped:
         print(f"{prefix}: пропущено {skipped} нод с неподдерживаемым транспортом")
+    if bad_server:
+        print(f"{prefix}: пропущено {bad_server} нод с недопустимым адресом сервера")
     return result
+
+def valid_server(server):
+    # Сервер ноды — только публичный IP или обычное имя хоста: подписка не должна
+    # направлять обход VPN в домашнюю сеть, на loopback или на мусор.
+    try:
+        return ipaddress.ip_address(server).is_global
+    except ValueError:
+        pass
+    labels = server.lower().split(".")
+    if len(labels) < 2 or len(server) > 253 or labels[-1] in ("lan", "local", "localhost", "internal"):
+        return False
+    return all(0 < len(l) <= 63 and l[0] != "-" and l[-1] != "-"
+               and all(ch.isascii() and (ch.isalnum() or ch == "-") for ch in l) for l in labels)
 
 def is_node(tag):
     return tag.split("-", 1)[0] in PREFIXES
@@ -219,6 +239,7 @@ def write_json(path, data):
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.flush()
         os.fsync(f.fileno())
+    os.chmod(tmp, 0o600)  # в конфиге UUID нод и секрет Clash API
     os.replace(tmp, path)
 
 try:
@@ -296,9 +317,8 @@ try:
             ipaddress.ip_address(srv)
             ip_bypass.append(f"{srv}/32" if ":" not in srv else f"{srv}/128")
         except ValueError:
-            parts = srv.split(".")
-            if len(parts) >= 2:
-                domain_bases.add(".".join(parts[-2:]))
+            # Обход — ровно по имени сервера ноды, а не по всему домену второго уровня.
+            domain_bases.add(srv)
 
     try:
         old_state = json.load(open(BYPASS_STATE_PATH, encoding="utf-8"))

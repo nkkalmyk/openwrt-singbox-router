@@ -14,7 +14,8 @@
 
 - Двойной NAT. IPv6 на WAN выключен (`wan6` disabled).
 - Wi-Fi: две точки (`phy0-ap0` 2.4 ГГц, `phy1-ap0` 5 ГГц).
-- Правило firewall `Allow-Asus-to-LAN`: сеть верхнего роутера UPSTREAM_NET/24 (судя по имени — Asus) может ходить в LAN.
+- Правило firewall `Allow-Asus-to-LAN`: сеть верхнего роутера UPSTREAM_NET/24 может ходить **только к лампе**
+  LAN_DEVICE_IP (с 2026-10-05; адрес лампы закреплён в DHCP).
 - avahi-daemon — рефлектор mDNS между `br-lan` и `wan`: чтобы управлять умной лампочкой (Yeelink)
   из сети верхнего роутера. Нужен, не удалять (вместе с dbus).
 
@@ -38,7 +39,7 @@
 | 1 | inbound `dns-in` | hijack-dns (DNS-сервер, см. ниже) |
 | 2 | inbound `tun-in` | sniff |
 | 3 | IP нод VLESS (`ip_cidr`) | direct — **обновляет update-vless.py** |
-| 4 | домены нод (`*.nodes.example.com`, P2) | direct — **обновляет update-vless.py** |
+| 4 | имена серверов нод P2 (точные хосты, с 2026-10-05) | direct — **обновляет update-vless.py** |
 | 5 | порт 41641 (WireGuard Tailscale у устройств LAN) | direct |
 | 6 | домены tailscale (`tailscale.com`, `.io`, `ts.net`, keyword) | direct |
 | 7 | 100.64.0.0/10 (Tailscale CGNAT) | direct |
@@ -237,7 +238,8 @@ apk при обновлении сохраняет наш файл и кладё
 GOMEMLIMIT ограничивает именно рабочую память Go — запас трёхкратный. `health.sh` пишет `sb=` (RssAnon) и
 `code=` (RssFile); до 2026-10-03 13:20 в `sb=` был VmRSS (40–47 MB) — со старыми строками не сравнивать.
 `mem` / `vpn mem` показывают обе колонки. Лимиты подбирались итеративно после реального OOM (тогда виноват был AdGuard Home, удалён) —
-менять только с замерами. sysctl: `nf_conntrack_max=65536`, укороченные таймауты conntrack.
+менять только с замерами. sysctl: `nf_conntrack_max=65536`, укороченные таймауты conntrack; `tcp_orphan_retries=3`, `tcp_max_orphans=2048`
+(с 2026-10-05: сокеты к мёртвой ноде закрываются за секунды, а не минуты).
 
 ## Сохранение при перепрошивке
 
