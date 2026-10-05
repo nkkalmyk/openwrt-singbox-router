@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+# Сутки одной строкой по часам: vpn day [N] [--emoji]. Данные — /root/uptime.log (его пишет uptime-hourly).
+#   router-day            — сегодня и вчера: по часам, для VPN и для интернета у провайдера
+#   router-day 7          — последние 7 дней: по строке на день
+#   --emoji               — цветные квадраты-эмодзи (для Telegram); иначе — цветные блоки в терминале или символы # + X - .
+import datetime, os, re, sys
+try:
+    sys.path.insert(0, "/usr/lib")
+    sys.dont_write_bytecode = True
+    from sb_ui import paint, color_on
+except ImportError:   # модуля нет — символы без цвета
+    paint = lambda t, k: t
+    color_on = lambda: False
+
+LOG = os.environ.get("UPTIME_LOG", "/root/uptime.log")
+MIN_SAMPLES = 6        # меньше замеров в часе — роутер был выключен
+DAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"]
+
+args = [a for a in sys.argv[1:] if a != "--emoji"]
+emoji = "--emoji" in sys.argv
+week = int(args[0]) if args and args[0].isdigit() else 0
+
+now = datetime.datetime.now()
+data = {}
+try:
+    for line in open(LOG):
+        m = re.match(r"(\d{4}-\d\d-\d\d) (\d\d) n=(\d+) vpn_fail=(\d+) inet_fail=(\d+)", line)
+        if m:
+            data[(datetime.date.fromisoformat(m[1]), int(m[2]))] = tuple(int(m[i]) for i in (3, 4, 5))
+except FileNotFoundError:
+    pass
+
+def hour_kinds(day, hh):
+    """Состояние часа: (VPN, интернет) — ok / minor / bad / net / nodata. net — VPN не работал из-за интернета."""
+    v = data.get((day, hh))
+    if v is None or v[0] < MIN_SAMPLES:
+        return "nodata", "nodata"
+    n, vf, inf = v
+    vpn_only = max(0, vf - inf)          # сбои VPN сверх тех, когда не было интернета
+    vpn = "net" if vf and not vpn_only else "ok" if not vf else "minor" if vpn_only <= 2 else "bad"
+    inet = "ok" if not inf else "minor" if inf <= 2 else "bad"
+    return vpn, inet
+
+def sym(kind):
+    if emoji:
+        return {"ok": "🟩", "minor": "🟨", "bad": "🟥", "net": "🟦", "nodata": "⬛"}[kind]
+    if color_on():
+        return {"ok": paint("█", "ok"), "minor": paint("█", "warn"), "bad": paint("█", "bad"),
+                "net": paint("█", "dim"), "nodata": paint("·", "dim")}[kind]
+    return {"ok": "#", "minor": "+", "bad": "X", "net": "-", "nodata": "."}[kind]
+
+def day_hours(day):
+    """Часы, по которым уже есть смысл показывать (будущее и идущий час не рисуем)."""
+    if day > now.date():
+        return 0
+    return now.hour if day == now.date() else 24
+
+def day_stats(day):
+    n = vpn_min = inet_min = nodata = 0
+    for hh in range(day_hours(day)):
+        v = data.get((day, hh))
+        if v is None or v[0] < MIN_SAMPLES:
+            nodata += 1
+            continue
+        n += v[0]
+        vpn_min += max(0, v[1] - v[2]) * 5
+        inet_min += v[2] * 5
+    return n, vpn_min, inet_min, nodata
+
+# Для Telegram: VPN и интернет в одной сетке (эмодзи крупные, 12 в строку на телефоне не влезают → по 8 часов:
+# ночь, день, вечер). Час красится по VPN; если VPN в порядке, но интернета у провайдера не было — 🟦.
+def tg_kind(day, hh):
+    v, i = hour_kinds(day, hh)
+    if v in ("nodata", "bad", "minor"):
+        return v
+    return "net" if v == "net" or i != "ok" else "ok"
+
+LEGEND = {"minor": "🟨 мелкий сбой", "bad": "🟥 сбой VPN", "net": "🟦 нет интернета", "nodata": "⬛ нет данных"}
+
+def show_day_tg(day):
+    print("📅 " + title(day))
+    kinds = [tg_kind(day, hh) for hh in range(day_hours(day))]
+    for a in (0, 8, 16):
+        if kinds[a:a + 8]:
+            print(f"{a:02d}  " + "".join(sym(k) for k in kinds[a:a + 8]))
+    n, vpn_min, inet_min, nodata = day_stats(day)
+    print(f"VPN не работал ~{vpn_min} мин." if vpn_min else "VPN без сбоев.")
+    print(f"Провайдер: ~{inet_min} мин без интернета." if inet_min else "Провайдер: без сбоев.")
+    legend = [LEGEND[k] for k in LEGEND if k in kinds]
+    if legend:
+        print(" · ".join(legend))
+
+def title(day):
+    d = (now.date() - day).days
+    name = "Сегодня" if d == 0 else "Вчера" if d == 1 else DAYS[day.weekday()]
+    return f"{name}, {day.day} {MONTHS[day.month - 1]}"
+
+def show_day(day):
+    if emoji:
+        return show_day_tg(day)
+    print(title(day))
+    hours = day_hours(day)
+    for label, idx in (("VPN ", 0), ("Сеть", 1)):
+        for part, (a, b) in enumerate(((0, 12), (12, 24))):
+            cells = "".join(sym(hour_kinds(day, hh)[idx]) for hh in range(a, min(b, hours)))
+            if cells:
+                print(f"{label if part == 0 else '    '} {a:02d}–{b - 1:02d} {cells}")
+    n, vpn_min, inet_min, nodata = day_stats(day)
+    bits = [f"VPN не работал ~{vpn_min} мин" if vpn_min else "VPN без сбоев",
+            f"интернет у провайдера пропадал ~{inet_min} мин" if inet_min else "у провайдера без сбоев"]
+    if nodata:
+        bits.append(f"нет данных за {nodata} ч")
+    print(", ".join(bits) + ".")
+
+def show_week(days):
+    if not data:
+        print("Данных пока нет.")
+        return
+    first = min(d for d, _ in data)          # дни до начала истории не показываем
+    for k in range(days - 1, -1, -1):
+        day = now.date() - datetime.timedelta(days=k)
+        if day < first:
+            continue
+        n, vpn_min, inet_min, nodata = day_stats(day)
+        head = f"{DAYS[day.weekday()]} {day:%d.%m}"
+        if not n:
+            print(f"{head}  {sym('nodata')}  нет данных")
+            continue
+        kinds = [hour_kinds(day, hh)[0] for hh in range(day_hours(day))]
+        worst = "bad" if "bad" in kinds else "minor" if "minor" in kinds else "ok"
+        pct = f"{100 - vpn_min / 5 * 100 / n:5.1f}".replace(".", ",")      # доля замеров с работающим VPN
+        extra = f" · сеть ~{inet_min} мин" if inet_min else ""
+        gap = f" · нет данных {nodata} ч" if nodata else ""
+        print(f"{head}  {sym(worst)}  {pct} %  ~{vpn_min} мин{extra}{gap}")
+
+if not data:
+    print("Данных пока нет: почасовая сводка начнёт копиться в :58 ближайшего часа (uptime-hourly).")
+elif week:
+    show_week(min(week, 31))
+else:
+    show_day(now.date() - datetime.timedelta(days=1))
+    print()
+    show_day(now.date())

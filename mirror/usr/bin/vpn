@@ -3,28 +3,36 @@
 # apply-vless.sh, mem и проверками из /usr/lib/sb-common.sh. Справка: vpn help
 . /usr/lib/sb-common.sh
 
-ok() { if "$@"; then printf 'OK'; else printf 'НЕТ'; fi; }
+# Цвета — только в терминале (вывод status идёт через трубу, поэтому решение принимаем здесь и передаём
+# дочерним скриптам в VPN_COLOR). Telegram, cron и `| cat` получают чистый текст.
+if [ -t 1 ] && [ -z "$NO_COLOR" ]; then VPN_COLOR=1; else VPN_COLOR=0; fi
+export VPN_COLOR
+C_OK='' C_WARN='' C_BAD='' C_HEAD='' C_RST=''
+[ "$VPN_COLOR" = 1 ] && { C_OK=$(printf '\033[32m') C_WARN=$(printf '\033[33m') C_BAD=$(printf '\033[31m')
+                          C_HEAD=$(printf '\033[1m') C_RST=$(printf '\033[0m'); }
+
+ok() { if "$@"; then printf '%sOK%s' "$C_OK" "$C_RST"; else printf '%sНЕТ%s' "$C_BAD" "$C_RST"; fi; }
 
 status() {
     local trace loc node gem gsel up rss ts
-    echo "=== Состояние ==="
+    printf '%s=== Состояние ===%s\n' "$C_HEAD" "$C_RST"
     printf ' Интернет провайдера   %s\n' "$(ok direct_ok)"
     trace=$(curl -s -m 8 https://1.1.1.1/cdn-cgi/trace 2>/dev/null)
     loc=$(echo "$trace" | sed -n 's/^loc=//p')
     node=$(sb_api /proxies/auto | jsonfilter -e '@.now' 2>/dev/null)
     gem=$(sb_api /proxies/gemini-auto | jsonfilter -e '@.now' 2>/dev/null)
     if [ -n "$loc" ] && [ "$loc" != "RU" ]; then
-        printf ' VPN                   OK — выход в %s через %s\n' "$loc" "${node:-?}"
+        printf ' VPN                   %sOK%s — выход в %s через %s\n' "$C_OK" "$C_RST" "$loc" "${node:-?}"
     else
-        printf ' VPN                   НЕ РАБОТАЕТ (выход: %s)\n' "${loc:-нет ответа}"
+        printf ' VPN                   %sНЕ РАБОТАЕТ%s (выход: %s)\n' "$C_BAD" "$C_RST" "${loc:-нет ответа}"
     fi
     [ "$(sb_api /proxies/proxy | jsonfilter -e '@.now' 2>/dev/null)" = "auto" ] \
-        || echo "                       (нода выбрана вручную — вернуть: vpn auto)"
+        || printf '                       %s(нода выбрана вручную — вернуть: vpn auto)%s\n' "$C_WARN" "$C_RST"
     gsel=$(sb_api /proxies/gemini-select | jsonfilter -e '@.now' 2>/dev/null)
     if [ "$gsel" = "gemini-auto" ]; then
         printf ' Gemini                через %s\n' "${gem:-?}"
     else
-        printf ' Gemini                через %s (выбрана вручную — вернуть: vpn gemini auto)\n' "${gsel:-?}"
+        printf ' Gemini                через %s %s(выбрана вручную — вернуть: vpn gemini auto)%s\n' "${gsel:-?}" "$C_WARN" "$C_RST"
     fi
     printf ' Маршрутизация         %s\n' "$(ok routing_ok)"
     if pidof sing-box >/dev/null; then
@@ -33,14 +41,15 @@ status() {
         rss=$(awk '/RssAnon/{print int($2/1024)}' "/proc/$(pidof sing-box | cut -d' ' -f1)/status")
         printf ' sing-box              работает %d ч %d мин, память %s MB\n' $((up / 3600)) $((up % 3600 / 60)) "$rss"
     else
-        echo " sing-box              НЕ ЗАПУЩЕН (сторож поднимет в течение минуты; сразу: vpn restart)"
+        printf ' sing-box              %sНЕ ЗАПУЩЕН%s (сторож поднимет в течение минуты; сразу: vpn restart)\n' "$C_BAD" "$C_RST"
     fi
     ts=$(curl -s -m 5 --unix-socket /var/run/tailscale/tailscaled.sock \
         http://local-tailscaled.sock/localapi/v0/status 2>/dev/null | jsonfilter -e '@.BackendState' 2>/dev/null)
-    printf ' Tailscale             %s\n' "${ts:-не отвечает}"
+    if [ "$ts" = Running ]; then printf ' Tailscale             %s%s%s\n' "$C_OK" "$ts" "$C_RST"
+    else printf ' Tailscale             %s%s%s\n' "$C_BAD" "${ts:-не отвечает}" "$C_RST"; fi
     printf ' Свободная память      %s MB\n' "$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)"
-    echo "=== Последние события (все: vpn log) ==="
-    tail -n 5 "$EVENTS" 2>/dev/null || echo " событий нет"
+    printf '%s=== Последние события (все: vpn log) ===%s\n' "$C_HEAD" "$C_RST"
+    sb-ping events 5
 }
 
 help() {
@@ -55,6 +64,7 @@ vpn lists            — что в списках direct/proxy
 vpn update           — обновить ноды из подписок (перезапуск только если они изменились)
 vpn restart          — безопасно перезапустить sing-box (~6 с без интернета)
 vpn log [N]          — что делала автоматика (журнал переживает перезагрузку)
+vpn day [N]          — сутки по часам: где был сбой VPN и интернета (vpn day 7 — неделя, по строке на день)
 vpn report [часы]    — отчёт о здоровье за 12 ч (сам делается в 07:45 и 19:45 мск; прошлые: vpn report all)
 vpn speed            — замер скорости через VPN и напрямую (~1 мин)
 vpn tg setup         — подключить уведомления в Telegram (роутер пишет, только если что-то сломалось/починилось)
@@ -82,6 +92,7 @@ case "$cmd" in
     update)     /usr/bin/apply-vless.sh ;;
     restart)    /usr/bin/sb-restart.sh вручную && echo "Готово." ;;
     log)        sb-ping events "$@" ;;
+    day)        /usr/bin/router-day "$@" ;;
     report)     if [ "$1" = all ]; then sb-ping pretty < /root/reports.log 2>/dev/null || echo "Отчётов ещё нет."; else /usr/bin/router-report "$@"; fi ;;
     speed)      /usr/bin/router-speedtest.sh ;;
     tg)         case "$1" in

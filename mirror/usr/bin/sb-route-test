@@ -1,5 +1,11 @@
 # Куда реально уходит запрос: делает curl к хосту и ловит соединение в Clash API.
-import json, re, subprocess, sys, time, urllib.request
+import json, subprocess, sys, time, urllib.request
+try:
+    sys.path.insert(0, "/usr/lib")
+    sys.dont_write_bytecode = True
+    from sb_ui import pretty
+except ImportError:   # модуля нет — работаем без цветов и без чистки имён
+    pretty = lambda t: t
 SECRET = open("/etc/sing-box/.clash-secret").read().strip()
 def conns():
     req = urllib.request.Request("http://127.0.0.1:9090/connections",
@@ -20,8 +26,7 @@ for h in hosts:
     if found:
         out = found["chains"][0]
         rule = found["rule"].split(" => ")[0]
-        out = re.sub(r",-?E(?:x(?:t(?:r(?:a)?)?)?)?$", "", re.sub("[\U0001F1E6-\U0001F1FF]", "", out))
-        out = re.sub(r"^(P1|P2)-+", r"\1 ", out).replace(",-", ", ").strip(" ,-")   # имя ноды без флага, как в sb-ping
+        out = pretty(out)
         print(f"{h:34} {'НАПРЯМУЮ' if out == 'direct' else 'VPN: ' + out:36} {rule[:60]}")
     else:
         print(f"{h:34} (соединение не поймано)")

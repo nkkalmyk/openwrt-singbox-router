@@ -20,22 +20,14 @@ def call(path, data=None, method=None, timeout=10):
     raw = urllib.request.urlopen(req, timeout=timeout).read()
     return json.loads(raw.decode()) if raw else {}
 
-# Имена нод только для показа: без флагов-эмодзи (Termius и др. их не рисуют и сбивают колонки) и без
-# хвоста с названием тарифа (в теге он часто обрезан до 40 символов). Сами теги в конфиге не трогаем — по ним
-# идёт выбор нод (vpn use / vpn gemini работают по номерам).
-FLAGS = re.compile("[\U0001F1E6-\U0001F1FF]")
-TAG = re.compile(r"\b(?:P1|P2)-[^\s()]+")
-
-def pretty(tag):
-    s = FLAGS.sub("", tag)
-    s = re.sub(r",-?E(?:x(?:t(?:r(?:a)?)?)?)?$", "", s)
-    s = re.sub(r"^(P1|P2)-+", r"\1 ", s)
-    s = s.replace(",-", ", ")
-    s = re.sub(r"--+", "-", s)
-    return s.strip(" ,-")
-
-def pretty_text(text):
-    return TAG.sub(lambda m: pretty(m.group(0)), text)
+try:
+    sys.path.insert(0, "/usr/lib")
+    sys.dont_write_bytecode = True
+    from sb_ui import pretty, pretty_text, paint, delay_kind, event_kind
+except ImportError:   # модуля нет — работаем без цветов и без чистки имён
+    pretty = pretty_text = lambda t: t
+    paint = lambda t, k: t
+    delay_kind = event_kind = lambda x: None
 
 def local_time(stamp):
     # sing-box пишет время в UTC с наносекундами: 2026-10-04T18:47:10.513694691Z
@@ -80,9 +72,9 @@ def show():
     alive = sorted([n for n in ns if n[1] > 0], key=lambda x: x[1])
     dead = [n for n in ns if n[1] == 0]
     for i, (name, delay, _) in enumerate(alive, 1):
-        print(f" {i:2d}. {delay:4d} ms  {pretty(name)}")
+        print(f" {i:2d}. {paint(f'{delay:4d} ms', delay_kind(delay))}  {pretty(name)}")
     for name, _, _ in dead:
-        print(f"  —   ---- ms  {pretty(name)}")
+        print(paint(f"  —   ---- ms  {pretty(name)}", "dim"))
     print("=" * 45)
     if "proxy" in p:
         print(" vpn use N — включить ноду №N | vpn auto — автовыбор | vpn test — перепроверить все")
@@ -97,9 +89,10 @@ def test():
         path = "/proxies/" + urllib.parse.quote(name, safe="") + "/delay?" + q
         try:
             r = call(path, timeout=12)
-            print(f" {r.get('delay', 0):4d} ms  {pretty(name)}")
+            d = r.get('delay', 0)
+            print(f" {paint(f'{d:4d} ms', delay_kind(d))}  {pretty(name)}")
         except Exception:
-            print(f"  ---- ms  {pretty(name)}")
+            print(paint(f"  ---- ms  {pretty(name)}", "dim"))
 
 def switch(target):
     p = proxies()
@@ -138,9 +131,9 @@ def show_gemini():
     ns = gemini_nodes(p)
     alive = sorted([n for n in ns if n[1] > 0], key=lambda x: x[1])
     for i, (name, delay, _) in enumerate(alive, 1):
-        print(f" {i:2d}. {delay:4d} ms  {pretty(name)}")
+        print(f" {i:2d}. {paint(f'{delay:4d} ms', delay_kind(delay))}  {pretty(name)}")
     for name, _, _ in [n for n in ns if n[1] == 0]:
-        print(f"  —   ---- ms  {pretty(name)}")
+        print(paint(f"  —   ---- ms  {pretty(name)}", "dim"))
     print("=" * 45)
     print(" vpn gemini N — включить ноду №N для Gemini | vpn gemini auto — автовыбор")
 
@@ -242,7 +235,7 @@ def show_events(n):
         lines = open(EVENTS, encoding="utf-8").read().splitlines()
     except FileNotFoundError:
         lines = []
-    print(pretty_text("\n".join(lines[-n:])) if lines else "Событий пока нет — автоматике не приходилось вмешиваться.")
+    print("\n".join(paint(pretty_text(l), event_kind(l)) for l in lines[-n:]) if lines else "Событий пока нет — автоматике не приходилось вмешиваться.")
 
 try:
     cmd = sys.argv[1] if len(sys.argv) > 1 else "show"

@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+# Почасовая сводка проверок для `vpn day`. cron в :58 каждого часа.
+# /tmp/health.log (в RAM, пропадает при перезагрузке, ~41 ч, без дат) → /root/uptime.log (флеш, 31 день):
+#   2026-10-05 14 n=12 vpn_fail=1 inet_fail=0     — час, замеров, с ошибкой VPN, с ошибкой у провайдера
+# Даты в health.log нет, её восстанавливаем, идя от конца: время пошло «вперёд» — значит, перешли в предыдущие сутки.
+# Идемпотентно: запускать можно сколько угодно раз (так же заполняется история при установке).
+import datetime, os, re, sys
+
+HEALTH = os.environ.get("HEALTH_LOG", "/tmp/health.log")
+OUT = os.environ.get("UPTIME_LOG", "/root/uptime.log")
+KEEP = 744   # 31 день
+
+now = datetime.datetime.now()
+rows = []
+for line in open(HEALTH, encoding="utf-8", errors="ignore"):
+    m = re.match(r"(\d\d):(\d\d) .*proxy=(\d+)/\S+ direct=(\d+)", line)
+    if m:
+        rows.append((int(m[1]), int(m[2]), m[3] == "000", m[4] == "000"))
+
+hours = {}   # (дата, час) -> [замеров, ошибок VPN, ошибок провайдера]
+date, prev = now.date(), None
+for hh, mm, vpn_bad, inet_bad in reversed(rows):
+    t = hh * 60 + mm
+    if prev is None and t > now.hour * 60 + now.minute + 5:
+        date -= datetime.timedelta(days=1)      # последняя строка вчерашняя (роутер час не писал)
+    elif prev is not None and t > prev:
+        date -= datetime.timedelta(days=1)
+    prev = t
+    h = hours.setdefault((date, hh), [0, 0, 0])
+    h[0] += 1
+    h[1] += vpn_bad
+    h[2] += inet_bad
+
+old = {}
+try:
+    for line in open(OUT):
+        m = re.match(r"(\d{4}-\d\d-\d\d) (\d\d) n=(\d+) vpn_fail=(\d+) inet_fail=(\d+)", line)
+        if m:
+            old[(datetime.date.fromisoformat(m[1]), int(m[2]))] = [int(m[3]), int(m[4]), int(m[5])]
+except FileNotFoundError:
+    pass
+
+for key, val in hours.items():
+    if key == (now.date(), now.hour) and now.minute < 56:
+        continue                                  # час ещё идёт
+    if key not in old or val[0] >= old[key][0]:   # при повторе оставляем запись, где замеров больше
+        old[key] = val
+
+out = [f"{d} {h:02d} n={v[0]} vpn_fail={v[1]} inet_fail={v[2]}\n" for (d, h), v in sorted(old.items())][-KEEP:]
+tmp = OUT + ".tmp"
+with open(tmp, "w") as f:
+    f.writelines(out)
+os.replace(tmp, OUT)

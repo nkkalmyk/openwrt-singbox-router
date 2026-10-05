@@ -97,9 +97,9 @@ setup() {
     printf "TG_TOKEN='%s'\nTG_CHAT='%s'\nTG_ENABLED=1\n" "$TG_TOKEN" "$TG_CHAT" > "$CONF"
     init_state
     [ -x /etc/init.d/router-bot ] && /etc/init.d/router-bot start
-    if send "✅ Роутер подключён. Буду писать сюда, только если что-то сломалось или починилось.
+    if send_kb "✅ Роутер подключён. Буду писать сюда, только если что-то сломалось или починилось.
 
-$BOT_HELP"; then
+$BOT_HELP" "$KB"; then
         echo "   Готово: отправил сообщение в чат «$who». Проверь Telegram."
     else
         echo "   Настройки сохранены, но сообщение не ушло. Проверь позже: vpn tg test"
@@ -113,76 +113,127 @@ $BOT_HELP"; then
 # а сообщения старше 2 минут игнорирует (иначе /reboot_yes после перезагрузки выполнился бы снова).
 BOT_PENDING=/tmp/router-bot.pending
 
-BOT_HELP="Команды:
-/status — состояние: интернет, VPN, sing-box, Tailscale
+BOT_HELP="Кнопки внизу — самое частое. Остальное — командами:
+/status — состояние
 /nodes — ноды и задержки
 /gemini — ноды для Gemini
+/day — сутки по часам
+/week — последние 7 дней
 /report — отчёт за 12 часов
-/log — что делала автоматика
-/site ozon.ru — куда идёт сайт (напрямую или VPN)
-/auto — вернуть автовыбор ноды
-/update — обновить ноды из подписок
-/speed — замер скорости (~1 мин)
-/restart — перезапустить sing-box (~6 с без интернета)
-/reboot — перезагрузить роутер (~2 мин без интернета)"
+/log — журнал автоматики
+/site ozon.ru — куда идёт сайт
+/auto — автовыбор ноды
+/update — обновить ноды
+/speed — замер скорости
+/more — ещё: кнопками
+/restart — перезапуск sing-box
+/reboot — перезагрузка роутера"
 
-# Отправить вывод команды моноширинным текстом, кусками до ~3500 байт (лимит Telegram — 4096 символов).
-send_pre() {
-    printf '%s\n' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' \
-        | awk -v max=3500 '{ if (n + length($0) + 1 > max && n > 0) { printf "%s", "\036"; n = 0 } print; n += length($0) + 1 }' \
-        | awk 'BEGIN { RS = "\036" } { print > ("/tmp/router-bot.part" NR) }'
-    for f in /tmp/router-bot.part*; do
-        [ -f "$f" ] || continue
-        api sendMessage --data-urlencode "chat_id=$TG_CHAT" --data-urlencode "parse_mode=HTML" \
-            --data-urlencode "text=<pre>$(cat "$f")</pre>" >/dev/null
-        rm -f "$f"
-    done
+# Постоянные кнопки под полем ввода. Нажатие приходит как обычный текст и превращается в команду в bot().
+KB='{"keyboard":[[{"text":"📊 Состояние"},{"text":"🌐 Ноды"}],[{"text":"📅 Сутки"},{"text":"📋 Отчёт"}],[{"text":"📜 Журнал"},{"text":"⚙️ Ещё"}]],"resize_keyboard":true,"is_persistent":true}'
+# Кнопки в самом сообщении («Ещё»); callback_data — только из этого списка, см. bot_callback().
+MORE_KB='{"inline_keyboard":[[{"text":"🔄 Обновить ноды","callback_data":"act:update"},{"text":"🎯 Автовыбор","callback_data":"act:auto"}],[{"text":"⚡ Скорость","callback_data":"act:speed"}],[{"text":"♻️ Перезапуск sing-box","callback_data":"act:restart"}],[{"text":"⏻ Перезагрузка роутера","callback_data":"act:reboot"}]]}'
+
+send_kb() {   # send_kb <текст> <клавиатура-json>
+    api sendMessage --data-urlencode "chat_id=$TG_CHAT" --data-urlencode "text=$1" --data-urlencode "reply_markup=$2" >/dev/null
+}
+answer_cb() {   # убрать «часики» на нажатой кнопке; <id> [текст-всплывашка]
+    api answerCallbackQuery --data-urlencode "callback_query_id=$1" --data-urlencode "text=${2:-}" >/dev/null
+}
+edit_msg() {   # заменить текст сообщения; без reply_markup кнопки под ним исчезают
+    api editMessageText --data-urlencode "chat_id=$TG_CHAT" --data-urlencode "message_id=$1" --data-urlencode "text=$2" >/dev/null
+}
+
+# Отправить ответ router-tg (HTML Telegram). Разметка не принята (редкость) — отправить тот же текст без тегов,
+# чтобы ответ не пропал.
+send_html() {
+    api sendMessage --data-urlencode "chat_id=$TG_CHAT" --data-urlencode "parse_mode=HTML" --data-urlencode "text=$1" >/dev/null \
+        || send "$(printf '%s' "$1" | sed -e 's/<[^>]*>//g' -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&amp;/\&/g')"
+}
+
+do_restart() {
+    event router-bot "Перезапуск sing-box из Telegram"
+    /usr/bin/sb-restart.sh telegram >/dev/null 2>&1
+    sleep 5
+    send_html "$(/usr/bin/router-tg status short)"
+}
+do_reboot() {
+    event router-bot "Перезагрузка роутера из Telegram"
+    send "Перезагружаюсь. Напишу, когда поднимусь."
+    api getUpdates -d "offset=$BOT_OFFSET" -d timeout=0 >/dev/null   # подтвердить, чтобы команда не повторилась
+    sleep 2
+    reboot
+    sleep 60
+}
+
+# Спросить подтверждение кнопками. nonce = время запроса: им же помечены кнопки и файл ожидания,
+# поэтому старая или повторная кнопка не сработает.
+ask_confirm() {   # ask_confirm restart|reboot
+    local what=$1 nonce text
+    nonce=$(date +%s)
+    echo "$what $nonce" > "$BOT_PENDING"
+    if [ "$what" = restart ]; then text="Перезапустить sing-box? Интернет пропадёт секунд на 6."
+    else text="Перезагрузить роутер? Интернет пропадёт минуты на 2."; fi
+    send_kb "$text" "{\"inline_keyboard\":[[{\"text\":\"✅ Да\",\"callback_data\":\"yes:$what:$nonce\"},{\"text\":\"✖️ Отмена\",\"callback_data\":\"no:$what:$nonce\"}]]}"
+}
+
+# Нажатие кнопки в сообщении. Принимаются только известные действия; чат уже проверен в bot().
+bot_callback() {   # bot_callback <id нажатия> <id сообщения> <callback_data>
+    local cbid=$1 mid=$2 data=$3 verb rest what nonce pend
+    case "$data" in
+        act:update)  answer_cb "$cbid"; bot_run /update ;;
+        act:auto)    answer_cb "$cbid"; bot_run /auto ;;
+        act:speed)   answer_cb "$cbid"; bot_run /speed ;;
+        act:restart) answer_cb "$cbid"; bot_run /restart ;;
+        act:reboot)  answer_cb "$cbid"; bot_run /reboot ;;
+        yes:restart:*|yes:reboot:*|no:restart:*|no:reboot:*)
+            verb=${data%%:*}; rest=${data#*:}; what=${rest%%:*}; nonce=${rest#*:}
+            pend=$(cat "$BOT_PENDING" 2>/dev/null)
+            case "$nonce" in ""|*[!0-9]*) answer_cb "$cbid" "Неизвестная кнопка"; return ;; esac   # дальше nonce идёт в арифметику
+            if [ "$pend" != "$what $nonce" ] || [ $(( $(date +%s) - nonce )) -gt 120 ]; then
+                answer_cb "$cbid" "Устарело"; edit_msg "$mid" "Устарело — запроси заново."; return
+            fi
+            rm -f "$BOT_PENDING"
+            if [ "$verb" = no ]; then answer_cb "$cbid" "Отменено"; edit_msg "$mid" "Отменено."; return; fi
+            answer_cb "$cbid"
+            if [ "$what" = restart ]; then edit_msg "$mid" "Перезапускаю sing-box…"; do_restart
+            else edit_msg "$mid" "Перезагружаю роутер…"; do_reboot; fi ;;
+        *) answer_cb "$cbid" "Неизвестная кнопка" ;;
+    esac
 }
 
 bot_run() {   # bot_run <команда> [аргумент]
     local cmd=$1 arg=$2 now pend
     now=$(date +%s)
     case "$cmd" in
-        /start|/help) send "$BOT_HELP" ;;
-        /status)  send_pre "$(/usr/bin/vpn status 2>&1)" ;;
-        /nodes)   send_pre "$(/usr/bin/vpn nodes 2>&1)" ;;
-        /gemini)  send_pre "$(/usr/bin/vpn gemini 2>&1)" ;;
-        /report)  send_pre "$(/usr/bin/vpn report 2>&1)" ;;
-        /log)     send_pre "$(/usr/bin/vpn log 15 2>&1)" ;;
+        /start|/help) send_kb "$BOT_HELP" "$KB" ;;
+        /more)    send_kb "Ещё:" "$MORE_KB" ;;
+        /status)  send_html "$(/usr/bin/router-tg status)" ;;
+        /nodes)   send_html "$(/usr/bin/router-tg nodes)" ;;
+        /gemini)  send_html "$(/usr/bin/router-tg gemini)" ;;
+        /report)  send_html "$(/usr/bin/router-tg report)" ;;
+        /day)     send "$(/usr/bin/vpn day --emoji 2>&1)" ;;
+        /week)    send "$(/usr/bin/vpn day 7 --emoji 2>&1)" ;;
+        /log)     send_html "$(/usr/bin/router-tg log)" ;;
         /site)
             if printf '%s' "$arg" | grep -Eq '^[A-Za-z0-9.:/_-]{1,200}$'; then
-                send_pre "$(/usr/bin/vpn site "$arg" 2>&1)"
+                send_html "$(/usr/bin/router-tg site "$arg")"
             else
                 send "Напиши сайт после команды, например: /site ozon.ru"
             fi ;;
-        /auto)    send_pre "$(/usr/bin/vpn auto 2>&1)" ;;
-        /update)  send "Обновляю ноды из подписок…"; send_pre "$(/usr/bin/vpn update 2>&1 | tail -n 15)" ;;
-        /speed)   send "Замеряю, это около минуты…"; send_pre "$(/usr/bin/vpn speed 2>&1)" ;;
-        /restart|/reboot)
-            echo "$cmd $now" > "$BOT_PENDING"
-            if [ "$cmd" = /restart ]; then
-                send "Перезапустить sing-box? Интернет пропадёт секунд на 6. Подтверди: /restart_yes (в течение 2 мин)"
-            else
-                send "Перезагрузить роутер? Интернет пропадёт минуты на 2. Подтверди: /reboot_yes (в течение 2 мин)"
-            fi ;;
-        /restart_yes|/reboot_yes)
+        /auto)    send_html "$(/usr/bin/router-tg auto)" ;;
+        /update)  send "Обновляю ноды из подписок…"; send_html "$(/usr/bin/router-tg update)" ;;
+        /speed)   send "Замеряю, это около минуты…"; send_html "$(/usr/bin/router-tg speed)" ;;
+        /restart|/reboot) ask_confirm "${cmd#/}" ;;
+        /restart_yes|/reboot_yes)   # то же текстом; кнопки «Да» делают то же через bot_callback
             pend=$(cat "$BOT_PENDING" 2>/dev/null)
             rm -f "$BOT_PENDING"
-            if [ "${pend% *}" != "${cmd%_yes}" ] || [ $((now - ${pend#* })) -gt 120 ]; then
+            if [ "/${pend% *}" != "${cmd%_yes}" ] || [ $((now - ${pend#* })) -gt 120 ]; then
                 send "Нечего подтверждать. Сначала ${cmd%_yes}"
             elif [ "$cmd" = /restart_yes ]; then
-                send "Перезапускаю sing-box…"
-                event router-bot "Перезапуск sing-box из Telegram"
-                /usr/bin/sb-restart.sh telegram >/dev/null 2>&1
-                sleep 5
-                send_pre "$(/usr/bin/vpn status 2>&1 | head -n 8)"
+                send "Перезапускаю sing-box…"; do_restart
             else
-                event router-bot "Перезагрузка роутера из Telegram"
-                send "Перезагружаюсь. Напишу, когда поднимусь."
-                api getUpdates -d "offset=$BOT_OFFSET" -d timeout=0 >/dev/null   # подтвердить, чтобы команда не повторилась
-                sleep 2
-                reboot
-                sleep 60
+                do_reboot
             fi ;;
         *) send "Не знаю такой команды. /help — список." ;;
     esac
@@ -202,17 +253,32 @@ bot() {
             upd=$(api getUpdates -d offset=-1 -d timeout=0) || { sleep 30; continue; }
             id=$(echo "$upd" | jq -r '.result[-1].update_id // empty' 2>/dev/null)
             BOT_OFFSET=$(( ${id:-0} + 1 ))
-            api setMyCommands --data-urlencode 'commands=[{"command":"status","description":"состояние"},{"command":"nodes","description":"ноды"},{"command":"gemini","description":"ноды для Gemini"},{"command":"report","description":"отчёт за 12 ч"},{"command":"log","description":"журнал автоматики"},{"command":"site","description":"куда идёт сайт"},{"command":"auto","description":"автовыбор ноды"},{"command":"update","description":"обновить ноды"},{"command":"speed","description":"замер скорости"},{"command":"restart","description":"перезапуск sing-box"},{"command":"reboot","description":"перезагрузка роутера"},{"command":"help","description":"все команды"}]' >/dev/null
+            api setMyCommands --data-urlencode 'commands=[{"command":"status","description":"состояние"},{"command":"nodes","description":"ноды"},{"command":"gemini","description":"ноды для Gemini"},{"command":"day","description":"сутки по часам"},{"command":"week","description":"неделя"},{"command":"report","description":"отчёт за 12 ч"},{"command":"log","description":"журнал автоматики"},{"command":"site","description":"куда идёт сайт"},{"command":"auto","description":"автовыбор ноды"},{"command":"update","description":"обновить ноды"},{"command":"speed","description":"замер скорости"},{"command":"restart","description":"перезапуск sing-box"},{"command":"reboot","description":"перезагрузка роутера"},{"command":"help","description":"все команды"}]' >/dev/null
         fi
-        upd=$(api getUpdates -d "offset=$BOT_OFFSET" -d timeout=50 -d 'allowed_updates=["message"]' -m 65) || { sleep 15; continue; }
-        echo "$upd" | jq -r '.result[] | [.update_id, (.message.chat.id // 0), (.message.date // 0),
-            ((.message.text // "") | split("\t") | join(" ") | split("\n") | join(" "))] | @tsv' 2>/dev/null > /tmp/router-bot.updates
-        while IFS="$(printf '\t')" read -r id chat date text; do
+        upd=$(api getUpdates -d "offset=$BOT_OFFSET" -d timeout=50 -d 'allowed_updates=["message","callback_query"]' -m 65) || { sleep 15; continue; }
+        # Поля через «|» (пустые поля сохраняются, в отличие от табуляции); текст — последним, в нём «|» допустим.
+        echo "$upd" | jq -r '.result[] | if .callback_query then
+              [.update_id, (.callback_query.message.chat.id // 0), (.callback_query.message.date // 0), .callback_query.id,
+               (.callback_query.message.message_id // 0), "cb", (.callback_query.data // "")]
+            else
+              [.update_id, (.message.chat.id // 0), (.message.date // 0), "", 0, "msg",
+               ((.message.text // "") | split("\t") | join(" ") | split("\n") | join(" "))]
+            end | map(tostring) | join("|")' 2>/dev/null > /tmp/router-bot.updates
+        while IFS='|' read -r id chat date cbid mid kind text; do
             BOT_OFFSET=$((id + 1))
             [ "$chat" = "$TG_CHAT" ] || continue
+            if [ "$kind" = cb ]; then            # кнопка: возраст не проверяем, защищает nonce
+                logger -t router-bot "кнопка: $text"
+                bot_callback "$cbid" "$mid" "$text"
+                continue
+            fi
             [ $(( $(date +%s) - date )) -le 120 ] || continue
             [ -n "$text" ] || continue          # стикеры, фото и т. п.
-            cmd=$(printf '%s' "$text" | awk '{print tolower($1)}' | sed 's/@.*//')
+            case "$text" in                      # постоянные кнопки внизу = команды
+                "📊"*) cmd=/status ;; "🌐"*) cmd=/nodes ;; "📅"*) cmd=/day ;;
+                "📋"*) cmd=/report ;; "📜"*) cmd=/log ;; "⚙"*) cmd=/more ;;
+                *) cmd=$(printf '%s' "$text" | awk '{print tolower($1)}' | sed 's/@.*//') ;;
+            esac
             arg=$(printf '%s' "$text" | awk '{print $2}')
             logger -t router-bot "команда: $cmd $arg"
             bot_run "$cmd" "$arg"

@@ -13,8 +13,9 @@
 - **Автоматика устойчивости:** обновление подписок раз в 30 мин с откатом, сторож sing-box, безопасный перезапуск,
   постоянный журнал событий, сторож Tailscale. Всё на busybox-шелле и python3.
 - **Tailscale** на роутере: удалённый доступ и exit node, трафик Tailscale идёт мимо sing-box.
-- **Telegram:** роутер сам пишет, когда что-то сломалось и починилось, и принимает команды (`/status`, `/nodes`,
-  `/restart`…) — откуда угодно, без белого IP. Подробно — [docs/telegram.md](docs/telegram.md).
+- **Telegram:** роутер сам пишет, когда что-то сломалось и починилось, и принимает команды и кнопки (`/status`, `/day`,
+  `/restart` с подтверждением ✅/✖️…) — откуда угодно, без белого IP; ответы рассчитаны на экран телефона. Подробно —
+  [docs/telegram.md](docs/telegram.md).
 
 ## Что где
 
@@ -51,6 +52,9 @@
 | [router-speedtest.sh](mirror/usr/bin/router-speedtest.sh) | Замер скорости через VPN и напрямую, приём и отдача, загрузка CPU | `vpn speed` |
 | [router-report](mirror/usr/bin/router-report) | Отчёт о здоровье за N часов: текущие проверки, провалы VPN и провайдера, память, журнал событий, итог | cron, 2 раза в день; `vpn report` |
 | [router-notify](mirror/usr/bin/router-notify) | Уведомления в Telegram (VPN лёг/вернулся, нет интернета у провайдера, перезагрузка, важные события); в режиме `--bot` — команды из чата | cron раз в минуту; служба `router-bot` |
+| [router-tg](mirror/usr/bin/router-tg) | Вид ответов бота для узкого экрана телефона: переписывает вывод `vpn status`, `sb-ping`, отчёта и др. | бот |
+| [uptime-hourly](mirror/usr/bin/uptime-hourly) / [router-day](mirror/usr/bin/router-day) | Почасовая сводка сбоев (31 день) и её отрисовка: `vpn day`, `/day` | cron в :58; `vpn day` |
+| [sb_ui.py](mirror/usr/lib/sb_ui.py) | Общий вид вывода: имена нод без флагов, цвета только в терминале | sb-ping, router-report, router-day |
 | [mem](mirror/usr/bin/mem) | Память по процессам: своя (RssAnon) и код (RssFile) | руками |
 | [sb-route-test](mirror/usr/bin/sb-route-test) | Открывает список сайтов и показывает, через какую ноду и по какому правилу ушло каждое соединение | руками |
 
@@ -72,6 +76,7 @@ vpn direct example.ru    # этот сайт всегда напрямую (vpn 
 vpn update               # обновить ноды из подписок (перезапуск, только если они изменились)
 vpn restart              # безопасно перезапустить sing-box (~6 с без интернета)
 vpn log                  # что делала автоматика
+vpn day                  # сутки по часам: где был сбой VPN и интернета (vpn day 7 — неделя)
 vpn report 24            # отчёт о здоровье за сутки: «всё хорошо» / «были сбои, автоматика справилась» / «проблема сейчас»
 vpn tg setup             # подключить Telegram: уведомления и команды (/status, /nodes, /restart…)
 vpn speed                # замер скорости через VPN и напрямую

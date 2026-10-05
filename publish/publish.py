@@ -31,6 +31,7 @@ FILES = [
     ("publish/TELEGRAM.public.md", "docs/telegram.md"),
     ("CLAUDE.md", None),
     ("docs/*.md", None),
+    ("plans/*.md", None),
     ("scripts/pull-from-router.sh", None),
     ("scripts/router-dnstest.py", None),
     ("publish/publish.py", None),

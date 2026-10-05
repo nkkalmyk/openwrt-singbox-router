@@ -158,7 +158,7 @@ COPYFILE_DISABLE=1 tar --uid 0 --gid 0 --uname root --gname root -C mirror -cf -
     usr etc/init.d/sing-box etc/config/sing-box etc/config/https-dns-proxy etc/sing-box \
     etc/init.d/router-bot etc/sysctl.conf etc/sysupgrade.conf etc/crontabs/root \
   | ssh router 'tar -xf - -C /'
-ssh router 'chmod 755 /usr/bin/vpn /usr/bin/sb-* /usr/bin/*.sh /usr/bin/*.py /usr/bin/mem /usr/bin/router-report /usr/bin/router-notify /etc/init.d/sing-box /etc/init.d/router-bot'
+ssh router 'chmod 755 /usr/bin/vpn /usr/bin/sb-* /usr/bin/*.sh /usr/bin/*.py /usr/bin/mem /usr/bin/router-report /usr/bin/router-notify /usr/bin/router-tg /usr/bin/router-day /usr/bin/uptime-hourly /etc/init.d/sing-box /etc/init.d/router-bot'
 ```
 
 - `--uid 0 --gid 0 --uname root --gname root` — без них файлы и даже каталоги `/usr`, `/usr/bin` на роутере станут
@@ -170,6 +170,7 @@ ssh router 'chmod 755 /usr/bin/vpn /usr/bin/sb-* /usr/bin/*.sh /usr/bin/*.py /us
 | Из репозитория | На роутер | Зачем |
 |---|---|---|
 | `mirror/usr/lib/sb-common.sh` | `/usr/lib/sb-common.sh` | общая библиотека: проверки, блокировка, журнал |
+| `mirror/usr/lib/sb_ui.py` | `/usr/lib/sb_ui.py` | общий вид вывода: имена нод без флагов, цвета в терминале |
 | `mirror/usr/bin/*` | `/usr/bin/` | `vpn`, `sb-ping`, `update-vless.py`, `apply-vless.sh`, сторожа, отчёт, бэкап |
 | `mirror/etc/init.d/sing-box` | `/etc/init.d/sing-box` | служба: лимиты памяти, безопасный перезапуск при подъёме WAN |
 | `mirror/etc/init.d/router-bot` | `/etc/init.d/router-bot` | бот команд в Telegram (по желанию, шаг 7) |
@@ -428,6 +429,7 @@ curl -s --interface "$W" https://1.1.1.1/cdn-cgi/trace | grep -E '^(ip|loc)='  #
 | `7,37 * * * *` | `apply-vless.sh` — обновить подписки; перезапуск только если сменились серверы |
 | `* * * * *` | `sb-watchdog.sh` — сторож sing-box |
 | `*/5 * * * *` | `health.sh` — строка состояния в `/tmp/health.log` |
+| `58 * * * *` | `uptime-hourly` — почасовая сводка сбоев в `/root/uptime.log` (для `vpn day`) |
 | `45 7,19 * * *` | `router-report --save` — отчёт о здоровье в `/root/reports.log` (`vpn report`) |
 | `0 8 * * 0` | `update-rulesets.sh` — базы geoip/geosite |
 | `30 8 * * 0` | `router-backup.sh` — полный бэкап в `/root/backups` (хранит 2) |

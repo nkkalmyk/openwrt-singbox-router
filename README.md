@@ -16,8 +16,9 @@ I maintain it together with an AI agent (Claude Code); [CLAUDE.md](CLAUDE.md) ho
   rotates server IPs. Restarts are safe (shared lock + post-checks), and there is a persistent event log.
 - **Tailscale on the router** for remote access and as an exit node. Its traffic bypasses sing-box (fwmark), so
   remote access survives tunnel crashes.
-- **Telegram:** the router messages you when something breaks and when it recovers, and takes commands (`/status`,
-  `/nodes`, `/restart`…) from anywhere, no public IP needed. See [docs/telegram.md](docs/telegram.md) (RU).
+- **Telegram:** the router messages you when something breaks and when it recovers, and takes commands and buttons
+  (`/status`, `/day`, `/restart` with ✅/✖️ confirmation…) from anywhere, no public IP needed; replies are laid out for a
+  phone screen. See [docs/telegram.md](docs/telegram.md) (RU).
 - Plain busybox `sh` + python3, memory-tuned for 256 MB (`GOMEMLIMIT`).
 
 ## Build your own
@@ -62,6 +63,9 @@ On the router (`/usr/bin`; in this repo, [mirror/usr/bin/](mirror/usr/bin/)):
 | [router-speedtest.sh](mirror/usr/bin/router-speedtest.sh) | Speed test through the tunnel and direct, down and up, with CPU load | `vpn speed` |
 | [router-report](mirror/usr/bin/router-report) | Health report for the last N hours: current checks, outages, memory, grouped events, verdict | cron, twice a day; `vpn report` |
 | [router-notify](mirror/usr/bin/router-notify) | Telegram alerts (tunnel down/back, ISP outage, reboot, important events); with `--bot`, chat commands | cron, every minute; `router-bot` service |
+| [router-tg](mirror/usr/bin/router-tg) | Phone-sized reply formatting for the Telegram bot (rewrites `vpn status`, `sb-ping`, the report…) | bot |
+| [uptime-hourly](mirror/usr/bin/uptime-hourly) / [router-day](mirror/usr/bin/router-day) | Hourly outage summary (31 days) and its rendering: `vpn day`, `/day` | cron at :58; `vpn day` |
+| [sb_ui.py](mirror/usr/lib/sb_ui.py) | Shared output style: node names without flags, colors only in a terminal | sb-ping, router-report, router-day |
 | [mem](mirror/usr/bin/mem) | Per-process memory: own (RssAnon) vs code (RssFile) | you |
 | [sb-route-test](mirror/usr/bin/sb-route-test) | Opens a list of sites and shows which node and rule each connection took | you |
 
@@ -76,6 +80,7 @@ vpn direct example.ru    # always direct (vpn proxy … — always via VPN, vpn 
 vpn update               # refresh nodes from subscriptions (restarts only if they changed)
 vpn restart              # safe sing-box restart (~6 s without internet)
 vpn log                  # what the automation did
+vpn day                  # outages hour by hour, yesterday and today (vpn day 7 — a week)
 vpn report 24            # health report for the last 24 h: all good / past outages handled / problem now
 vpn tg setup             # connect Telegram: alerts and chat commands (/status, /nodes, /restart…)
 vpn speed                # speed test, tunnel vs direct

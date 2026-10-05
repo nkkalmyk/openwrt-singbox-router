@@ -46,10 +46,14 @@ FILES="
 /usr/bin/ts-watchdog.sh
 /usr/bin/sb-restart.sh
 /usr/lib/sb-common.sh
+/usr/lib/sb_ui.py
 /usr/bin/vpn
 /usr/bin/router-speedtest.sh
 /usr/bin/router-report
 /usr/bin/router-notify
+/usr/bin/router-tg
+/usr/bin/uptime-hourly
+/usr/bin/router-day
 "
 
 echo "Снимаю файлы с $HOST..."

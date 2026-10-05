@@ -5,6 +5,14 @@
 # router-report --save [часы]   — ещё и дописать в /root/reports.log (cron), а если что-то не работает сейчас — событие в журнал
 import json, os, re, subprocess, sys, time, urllib.request
 from collections import Counter
+try:
+    sys.path.insert(0, "/usr/lib")
+    sys.dont_write_bytecode = True
+    from sb_ui import pretty_text, paint, report_kind
+except ImportError:   # модуля нет — работаем без цветов и без чистки имён
+    pretty_text = lambda t: t
+    paint = lambda t, k: t
+    report_kind = lambda l: None
 
 REPORTS = "/root/reports.log"
 REPORTS_KEEP = 14            # отчётов в файле (неделя при двух в день)
@@ -191,17 +199,9 @@ if past:
 for i in info:
     p(f"  · {i}")
 
-# Имена нод — без флагов-эмодзи и хвоста с названием тарифа, как в sb-ping (Termius флаги не рисует).
-FLAGS = re.compile("[\U0001F1E6-\U0001F1FF]")
-def pretty(tag):
-    s = FLAGS.sub("", tag)
-    s = re.sub(r",-?E(?:x(?:t(?:r(?:a)?)?)?)?$", "", s)
-    s = re.sub(r"^(P1|P2)-+", r"\1 ", s)
-    s = s.replace(",-", ", ")
-    s = re.sub(r"--+", "-", s)
-    return s.strip(" ,-")
-text = re.sub(r"\b(?:P1|P2)-[^\s()/]+", lambda m: pretty(m.group(0)), "\n".join(out))
-print(text)
+text = pretty_text("\n".join(out))
+# Сохраняется чистый текст; цвет — только при выводе в терминал.
+print("\n".join(paint(l, report_kind(l)) for l in text.split("\n")))
 
 if save:
     old = ""
