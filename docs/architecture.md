@@ -106,7 +106,9 @@ Clash API: `127.0.0.1:9090`, секрет в `/etc/sing-box/.clash-secret` (им
   (а не SERVFAIL) — поэтому и нужен такой переход.
 - Пока sing-box не запущен, туннеля нет и трафик идёт напрямую; сторож поднимет его в течение минуты.
 - `https-dns-proxy`: `dnsmasq_config_update='-'`, иначе при своём перезапуске он перепишет список серверов dnsmasq
-  на себя одного. Канарейки (`mask.icloud.com`, `use-application-dns.net`) заглушены в dnsmasq — iCloud Private
+  на себя одного. **Не делать `/etc/init.d/https-dns-proxy stop`**: при остановке он «восстанавливает» dnsmasq —
+  убирает `127.0.0.1#5053` и добавляет `1.1.1.1`, `8.8.8.8` из `doh_backup_server` (DNS мимо sing-box). Поднимать —
+  только `start` (`restart`/`reload` у него тоже = start). Если procd его бросил, его поднимает sb-watchdog (п. 0а). Канарейки (`mask.icloud.com`, `use-application-dns.net`) заглушены в dnsmasq — iCloud Private
   Relay и DoH Firefox не обходят роутерный DNS.
 - `route.default_domain_resolver = dns-ru` — им sing-box резолвит домены нод (у P2-нод серверы заданы доменами).
 

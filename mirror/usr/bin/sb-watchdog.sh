@@ -2,6 +2,7 @@
 # Сторож sing-box, cron раз в минуту. Пока всё работает — молчит.
 #  0) sing-box не запущен (procd бросает службу после 5 падений за час) → безопасный запуск,
 #     при невалидном конфиге — с возвратом к последнему рабочему; не чаще раза в 5 мин.
+#  0а) Запасной DNS https-dns-proxy не запущен (procd бросил) → start, не чаще раза в 15 мин.
 #  1) Нет tun0 или ip rules sing-box 2 мин подряд → безопасный перезапуск.
 #  2) VPN не работает (Cloudflare не отвечает или видит Россию) при живом провайдере:
 #     1-я мин — если выбранная нода не ответила 2 раза подряд, увести группы с неё (kick_groups strict);
@@ -50,6 +51,16 @@ flock -n 8 || exit 0
 exec 9>"$SB_LOCK"
 flock -n 9 || exit 0
 flock -u 9
+
+# 0а) Запасной DNS (https-dns-proxy, 127.0.0.1#5053) не запущен: procd бросает его после 5 падений за час —
+#     так было при обрыве у провайдера 2026-10-06. Поднимаем при живом провайдере, не чаще раза в 15 мин.
+#     Только start: stop у этой службы возвращает dnsmasq старый список серверов (1.1.1.1, 8.8.8.8).
+if /etc/init.d/https-dns-proxy enabled && ! pidof https-dns-proxy >/dev/null \
+    && [ "$(since last_hdp_start)" -ge "$REFRESH_MIN_INTERVAL" ] && direct_ok; then
+    stamp last_hdp_start
+    event sb-watchdog "Запасной DNS (https-dns-proxy) не запущен — поднимаю"
+    /etc/init.d/https-dns-proxy start >/dev/null 2>&1
+fi
 
 # 0) sing-box не запущен
 if ! pidof sing-box >/dev/null; then
