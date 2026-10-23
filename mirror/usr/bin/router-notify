@@ -39,6 +39,19 @@ send() {
     api sendMessage --data-urlencode "chat_id=$TG_CHAT" --data-urlencode "text=$1" >/dev/null
 }
 
+# Как api, но отдаёт тело ответа и при ошибке Telegram (400 «сообщение не изменилось» и т. п.).
+apix() {
+    local m=$1 ip
+    shift
+    curl -s -m 15 "$@" "https://api.telegram.org/bot$TG_TOKEN/$m" && return 0
+    ip=$(nslookup api.telegram.org 77.88.8.8 2>/dev/null | awk '/^Address/ && $NF !~ /:/ {a = $NF} END {print a}')
+    [ -n "$ip" ] && curl -s -m 15 --interface "$(wan_dev)" --resolve "api.telegram.org:443:$ip" "$@" \
+        "https://api.telegram.org/bot$TG_TOKEN/$m"
+}
+plain() { printf '%s' "$1" | sed -e 's/<[^>]*>//g' -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&amp;/\&/g'; }   # HTML → простой текст
+hesc() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }                                      # экранировать для HTML (stdin → stdout)
+time_tag() { printf '<tg-time unix="%s" format="t">%s</tg-time>' "$1" "$(date -d "@$1" +%H:%M)"; }     # время в поясе читателя
+
 # В очереди сообщение — одна строка; перевод строки записан как \n.
 enqueue() {
     mkdir -p "$ST"
@@ -51,7 +64,7 @@ flush() {
     [ -s "$Q" ] || return 0
     : > "$Q.rest"
     while IFS= read -r line; do
-        if [ "$fail" = 0 ] && send "$(printf '%s' "$line" | sed 's/\\n/\n/g')"; then
+        if [ "$fail" = 0 ] && send_alert "$line"; then
             :
         else
             fail=1
@@ -98,9 +111,7 @@ setup() {
     printf "TG_TOKEN='%s'\nTG_CHAT='%s'\nTG_ENABLED=1\n" "$TG_TOKEN" "$TG_CHAT" > "$CONF"
     init_state
     [ -x /etc/init.d/router-bot ] && /etc/init.d/router-bot start
-    if send_kb "✅ Роутер подключён. Буду писать сюда, только если что-то сломалось или починилось.
-
-$BOT_HELP" "$KB"; then
+    if send_html_kb "✅ <b>Роутер подключён</b>\nБуду писать сюда, только если что-то сломалось или починилось.\n\n$(/usr/bin/router-tg help 2>/dev/null | tail -n +2)" "$KB"; then
         echo "   Готово: отправил сообщение в чат «$who». Проверь Telegram."
     else
         echo "   Настройки сохранены, но сообщение не ушло. Проверь позже: vpn tg test"
@@ -133,7 +144,11 @@ BOT_HELP="Кнопки внизу — самое частое. Остально�
 # Постоянные кнопки под полем ввода. Нажатие приходит как обычный текст и превращается в команду в bot().
 KB='{"keyboard":[[{"text":"📊 Состояние"},{"text":"🌐 Ноды"}],[{"text":"📅 Сутки"},{"text":"📋 Отчёт"}],[{"text":"📜 Журнал"},{"text":"⚙️ Ещё"}]],"resize_keyboard":true,"is_persistent":true}'
 # Кнопки в самом сообщении («Ещё»); callback_data — только из этого списка, см. bot_callback().
-MORE_KB='{"inline_keyboard":[[{"text":"🔄 Обновить ноды","callback_data":"act:update"},{"text":"🎯 Автовыбор","callback_data":"act:auto"}],[{"text":"⚡ Скорость","callback_data":"act:speed"}],[{"text":"♻️ Перезапуск sing-box","callback_data":"act:restart"}],[{"text":"⏻ Перезагрузка роутера","callback_data":"act:reboot"}]]}'
+# style (primary/success/danger) — цвет кнопки; старые клиенты Telegram его игнорируют.
+MORE_KB='{"inline_keyboard":[[{"text":"🔄 Обновить ноды","callback_data":"act:update","style":"primary"},{"text":"🎯 Автовыбор","callback_data":"act:auto"}],[{"text":"⚡ Скорость","callback_data":"act:speed"},{"text":"🗺 Карта аптайма","callback_data":"nav:month"}],[{"text":"♻️ Перезапуск sing-box","callback_data":"act:restart","style":"danger"}],[{"text":"⏻ Перезагрузка роутера","callback_data":"act:reboot","style":"danger"}]]}'
+# Кнопки под тревогами: «go:» — прислать вид новым сообщением (тревогу не трогаем).
+ALERT_KB='{"inline_keyboard":[[{"text":"📊 Состояние","callback_data":"go:status"},{"text":"📜 Журнал","callback_data":"go:log"}]]}'
+ALERT_KB_VPN='{"inline_keyboard":[[{"text":"📊 Состояние","callback_data":"go:status"},{"text":"📜 Журнал","callback_data":"go:log"}],[{"text":"♻️ Перезапуск sing-box","callback_data":"act:restart","style":"danger"}]]}'
 
 send_kb() {   # send_kb <текст> <клавиатура-json>
     api sendMessage --data-urlencode "chat_id=$TG_CHAT" --data-urlencode "text=$1" --data-urlencode "reply_markup=$2" >/dev/null
@@ -141,8 +156,52 @@ send_kb() {   # send_kb <текст> <клавиатура-json>
 answer_cb() {   # убрать «часики» на нажатой кнопке; <id> [текст-всплывашка]
     api answerCallbackQuery --data-urlencode "callback_query_id=$1" --data-urlencode "text=${2:-}" >/dev/null
 }
-edit_msg() {   # заменить текст сообщения; без reply_markup кнопки под ним исчезают
-    api editMessageText --data-urlencode "chat_id=$TG_CHAT" --data-urlencode "message_id=$1" --data-urlencode "text=$2" >/dev/null
+edit_msg() {   # заменить текст сообщения (HTML); без reply_markup кнопки под ним исчезают
+    api editMessageText --data-urlencode "chat_id=$TG_CHAT" --data-urlencode "message_id=$1" --data-urlencode "parse_mode=HTML" --data-urlencode "text=$2" >/dev/null
+}
+
+# HTML-сообщение с кнопками. Разметку или кнопки не приняли — тот же текст без тегов (и без кнопок), чтобы ответ не пропал.
+send_html_kb() {   # send_html_kb <html> <клавиатура-json>
+    api sendMessage --data-urlencode "chat_id=$TG_CHAT" --data-urlencode "parse_mode=HTML" --data-urlencode "text=$1" --data-urlencode "reply_markup=$2" >/dev/null \
+        || send_kb "$(plain "$1")" "$2" || send "$(plain "$1")"
+}
+
+# Вкладки под ответами: пять видов + «обновить» и карта. Текущая вкладка синяя (style primary). Нажатие — nav:<вид>,
+# бот правит то же сообщение на месте (edit_view); карта — картинка новым сообщением.
+nav_tab() {   # nav_tab <вид> <эмодзи> <подсвеченный вид>
+    if [ "$1" = "$3" ]; then printf '{"text":"%s","callback_data":"nav:%s","style":"primary"}' "$2" "$1"
+    else printf '{"text":"%s","callback_data":"nav:%s"}' "$2" "$1"; fi
+}
+nav_kb() {   # nav_kb <вид>
+    local hl=$1
+    case "$1" in gemini) hl=nodes ;; week) hl=day ;; esac
+    printf '{"inline_keyboard":[[%s,%s,%s,%s,%s],[{"text":"🔄 Обновить","callback_data":"nav:%s"},{"text":"🗺 Карта аптайма","callback_data":"nav:month"}]]}' \
+        "$(nav_tab status 📊 "$hl")" "$(nav_tab nodes 🌐 "$hl")" "$(nav_tab day 📅 "$hl")" "$(nav_tab report 📋 "$hl")" "$(nav_tab log 📜 "$hl")" "$1"
+}
+send_view() {   # send_view status|nodes|gemini|day|week|report|log — ответ router-tg со вкладками
+    send_html_kb "$(/usr/bin/router-tg "$1")" "$(nav_kb "$1")"
+}
+edit_view() {   # edit_view <id сообщения> <вид> — заменить сообщение свежим видом. Не вышло — вернуть 1 (бот пришлёт новое)
+    local text out
+    text=$(/usr/bin/router-tg "$2") && [ -n "$text" ] || return 1
+    out=$(apix editMessageText --data-urlencode "chat_id=$TG_CHAT" --data-urlencode "message_id=$1" --data-urlencode "parse_mode=HTML" \
+        --data-urlencode "text=$text" --data-urlencode "reply_markup=$(nav_kb "$2")") || return 1
+    case "$out" in *'"ok":true'*|*'not modified'*) return 0 ;; esac   # «не изменилось» — тоже порядок: уже свежее
+    return 1
+}
+send_month() {   # карта аптайма: картинка с подписью (рисует router-day --png)
+    local cap
+    cap=$(/usr/bin/router-tg month) && [ -s /tmp/uptime-map.png ] || { send "Карта пока недоступна: данных мало."; return; }
+    api sendPhoto -F "chat_id=$TG_CHAT" -F "photo=@/tmp/uptime-map.png" -F "parse_mode=HTML" --form-string "caption=$cap" >/dev/null \
+        || send "Не получилось отправить карту."
+}
+# Тревога из очереди: HTML + кнопки. «K1|» в начале — про VPN (ещё и кнопка перезапуска). Не приняли разметку — просто текст.
+send_alert() {   # send_alert <строка очереди>
+    local line=$1 kb=$ALERT_KB text
+    case "$line" in K1\|*) kb=$ALERT_KB_VPN; line=${line#K1|} ;; esac
+    text=$(printf '%s' "$line" | sed 's/\\n/\n/g')
+    api sendMessage --data-urlencode "chat_id=$TG_CHAT" --data-urlencode "parse_mode=HTML" --data-urlencode "text=$text" --data-urlencode "reply_markup=$kb" >/dev/null \
+        || api sendMessage --data-urlencode "chat_id=$TG_CHAT" --data-urlencode "text=$(plain "$text")" >/dev/null
 }
 
 # Отправить ответ router-tg (HTML Telegram). Разметка не принята (редкость) — отправить тот же текст без тегов,
@@ -156,11 +215,11 @@ do_restart() {
     event router-bot "Перезапуск sing-box из Telegram"
     /usr/bin/sb-restart.sh telegram >/dev/null 2>&1
     sleep 5
-    send_html "$(/usr/bin/router-tg status short)"
+    send_view status
 }
 do_reboot() {
     event router-bot "Перезагрузка роутера из Telegram"
-    send "Перезагружаюсь. Напишу, когда поднимусь."
+    send_html "⏻ <b>Перезагружаюсь</b>\n<i>Напишу, когда поднимусь.</i>"
     api getUpdates -d "offset=$BOT_OFFSET" -d timeout=0 >/dev/null   # подтвердить, чтобы команда не повторилась
     sleep 2
     reboot
@@ -173,15 +232,20 @@ ask_confirm() {   # ask_confirm restart|reboot
     local what=$1 nonce text
     nonce=$(date +%s)
     echo "$what $nonce" > "$BOT_PENDING"
-    if [ "$what" = restart ]; then text="Перезапустить sing-box? Интернет пропадёт секунд на 6."
-    else text="Перезагрузить роутер? Интернет пропадёт минуты на 2."; fi
-    send_kb "$text" "{\"inline_keyboard\":[[{\"text\":\"✅ Да\",\"callback_data\":\"yes:$what:$nonce\"},{\"text\":\"✖️ Отмена\",\"callback_data\":\"no:$what:$nonce\"}]]}"
+    if [ "$what" = restart ]; then text="⚠️ <b>Перезапустить sing-box?</b>\nИнтернет пропадёт секунд на 6."
+    else text="⚠️ <b>Перезагрузить роутер?</b>\nИнтернет пропадёт минуты на 2."; fi
+    send_html_kb "$text" "{\"inline_keyboard\":[[{\"text\":\"✅ Да\",\"callback_data\":\"yes:$what:$nonce\",\"style\":\"success\"},{\"text\":\"✖️ Отмена\",\"callback_data\":\"no:$what:$nonce\"}]]}"
 }
 
 # Нажатие кнопки в сообщении. Принимаются только известные действия; чат уже проверен в bot().
 bot_callback() {   # bot_callback <id нажатия> <id сообщения> <callback_data>
     local cbid=$1 mid=$2 data=$3 verb rest what nonce pend
     case "$data" in
+        nav:status|nav:nodes|nav:gemini|nav:day|nav:week|nav:report|nav:log)   # вкладка: правим это же сообщение
+            answer_cb "$cbid" "Обновляю…"
+            edit_view "$mid" "${data#nav:}" || send_view "${data#nav:}" ;;
+        nav:month)   answer_cb "$cbid" "Рисую карту…"; send_month ;;
+        go:status|go:log)   answer_cb "$cbid"; send_view "${data#go:}" ;;
         act:update)  answer_cb "$cbid"; bot_run /update ;;
         act:auto)    answer_cb "$cbid"; bot_run /auto ;;
         act:speed)   answer_cb "$cbid"; bot_run /speed ;;
@@ -192,13 +256,13 @@ bot_callback() {   # bot_callback <id нажатия> <id сообщения> <c
             pend=$(cat "$BOT_PENDING" 2>/dev/null)
             case "$nonce" in ""|*[!0-9]*) answer_cb "$cbid" "Неизвестная кнопка"; return ;; esac   # дальше nonce идёт в арифметику
             if [ "$pend" != "$what $nonce" ] || [ $(( $(date +%s) - nonce )) -gt 120 ]; then
-                answer_cb "$cbid" "Устарело"; edit_msg "$mid" "Устарело — запроси заново."; return
+                answer_cb "$cbid" "Устарело"; edit_msg "$mid" "⌛ <b>Устарело</b> — запроси заново."; return
             fi
             rm -f "$BOT_PENDING"
-            if [ "$verb" = no ]; then answer_cb "$cbid" "Отменено"; edit_msg "$mid" "Отменено."; return; fi
+            if [ "$verb" = no ]; then answer_cb "$cbid" "Отменено"; edit_msg "$mid" "✖️ <b>Отменено</b>"; return; fi
             answer_cb "$cbid"
-            if [ "$what" = restart ]; then edit_msg "$mid" "Перезапускаю sing-box…"; do_restart
-            else edit_msg "$mid" "Перезагружаю роутер…"; do_reboot; fi ;;
+            if [ "$what" = restart ]; then edit_msg "$mid" "♻️ <b>Перезапускаю sing-box…</b>"; do_restart
+            else edit_msg "$mid" "⏻ <b>Перезагружаю роутер…</b>"; do_reboot; fi ;;
         *) answer_cb "$cbid" "Неизвестная кнопка" ;;
     esac
 }
@@ -207,15 +271,11 @@ bot_run() {   # bot_run <команда> [аргумент]
     local cmd=$1 arg=$2 now pend
     now=$(date +%s)
     case "$cmd" in
-        /start|/help) send_kb "$BOT_HELP" "$KB" ;;
-        /more)    send_kb "Ещё:" "$MORE_KB" ;;
-        /status)  send_html "$(/usr/bin/router-tg status)" ;;
-        /nodes)   send_html "$(/usr/bin/router-tg nodes)" ;;
-        /gemini)  send_html "$(/usr/bin/router-tg gemini)" ;;
-        /report)  send_html "$(/usr/bin/router-tg report)" ;;
-        /day)     send "$(/usr/bin/vpn day --emoji 2>&1)" ;;
-        /week)    send "$(/usr/bin/vpn day 7 --emoji 2>&1)" ;;
-        /log)     send_html "$(/usr/bin/router-tg log)" ;;
+        /start|/help)
+            help=$(/usr/bin/router-tg help) && [ -n "$help" ] && send_html_kb "$help" "$KB" || send_kb "$BOT_HELP" "$KB" ;;
+        /more)    send_html_kb "⚙️ <b>Ещё</b>" "$MORE_KB" ;;
+        /status|/nodes|/gemini|/report|/day|/week|/log) send_view "${cmd#/}" ;;
+        /month)   send_month ;;
         /site)
             if printf '%s' "$arg" | grep -Eq '^[A-Za-z0-9.:/_-]{1,200}$'; then
                 send_html "$(/usr/bin/router-tg site "$arg")"
@@ -254,7 +314,9 @@ bot() {
             upd=$(api getUpdates -d offset=-1 -d timeout=0) || { sleep 30; continue; }
             id=$(echo "$upd" | jq -r '.result[-1].update_id // empty' 2>/dev/null)
             BOT_OFFSET=$(( ${id:-0} + 1 ))
-            api setMyCommands --data-urlencode 'commands=[{"command":"status","description":"состояние"},{"command":"nodes","description":"ноды"},{"command":"gemini","description":"ноды для Gemini"},{"command":"day","description":"сутки по часам"},{"command":"week","description":"неделя"},{"command":"report","description":"отчёт за 12 ч"},{"command":"log","description":"журнал автоматики"},{"command":"site","description":"куда идёт сайт"},{"command":"auto","description":"автовыбор ноды"},{"command":"update","description":"обновить ноды"},{"command":"speed","description":"замер скорости"},{"command":"restart","description":"перезапуск sing-box"},{"command":"reboot","description":"перезагрузка роутера"},{"command":"help","description":"все команды"}]' >/dev/null
+            api setMyCommands --data-urlencode 'commands=[{"command":"status","description":"📊 состояние"},{"command":"nodes","description":"🌐 ноды и задержки"},{"command":"gemini","description":"✨ ноды для Gemini"},{"command":"day","description":"📅 сутки и неделя"},{"command":"month","description":"🗺 карта аптайма"},{"command":"report","description":"📋 отчёт за 12 часов"},{"command":"log","description":"📜 журнал автоматики"},{"command":"site","description":"🔎 куда идёт сайт"},{"command":"auto","description":"🎯 автовыбор ноды"},{"command":"update","description":"🔄 обновить ноды"},{"command":"speed","description":"⚡ замер скорости"},{"command":"restart","description":"♻️ перезапуск sing-box"},{"command":"reboot","description":"⏻ перезагрузка роутера"},{"command":"help","description":"ℹ️ все команды"}]' >/dev/null
+            api setMyShortDescription --data-urlencode 'short_description=Домашний роутер: интернет, VPN, ноды и сутки' >/dev/null
+            api setMyDescription --data-urlencode 'description=Домашний роутер на связи. Слежу за интернетом, VPN и Tailscale, пишу сюда, только если что-то сломалось или починилось. Кнопки покажут состояние, ноды, сутки и карту аптайма.' >/dev/null
         fi
         upd=$(api getUpdates -d "offset=$BOT_OFFSET" -d timeout=50 -d 'allowed_updates=["message","callback_query"]' -m 65) || { sleep 15; continue; }
         # Поля через «|» (пустые поля сохраняются, в отличие от табуляции); текст — последним, в нём «|» допустим.
@@ -337,7 +399,7 @@ case "$1" in
     --setup) setup; exit ;;
     --test)
         [ -n "$TG_TOKEN" ] || { echo "Уведомления не настроены: vpn tg setup"; exit 1; }
-        send "🔔 Проверка: роутер на связи, $(date '+%d.%m %H:%M')." && echo "Отправлено." || { echo "Не отправилось."; exit 1; }
+        send_alert "🔔 <b>Проверка связи</b>\n<blockquote>Роутер на связи · $(time_tag "$(date +%s)")</blockquote>" && echo "Отправлено." || { echo "Не отправилось."; exit 1; }
         exit ;;
     --status)
         if [ -n "$HC_URL" ]; then echo "Пульс (внешний сервис): включён, раз в 5 мин (выключить: vpn tg pulse off)"
@@ -374,17 +436,18 @@ up=$(cut -d. -f1 /proc/uptime)
 boot=$(cat /proc/sys/kernel/random/boot_id)
 if [ "$(cat "$ST/boot_id" 2>/dev/null)" != "$boot" ] && [ "$up" -ge 120 ]; then
     last=$(cat "$ST/heartbeat" 2>/dev/null)
-    msg="🔄 $(date '+%d.%m %H:%M') Роутер перезагрузился."
+    msg="🔄 <b>Роутер перезагрузился</b>\n<i>$(date '+%d.%m') · $(time_tag "$now")</i>"
     if [ -n "$last" ]; then
-        msg="$msg До этого работал примерно до $(date -d "@$last" '+%d.%m %H:%M') (точность ±15 мин)."
+        body="До этого работал примерно до $(date -d "@$last" '+%d.%m') $(time_tag "$last") (точность ±15 мин)."
         since_t=$(date -d "@$((last - 900))" '+%Y-%m-%d %H:%M:%S')
         if awk -v t="$since_t" '$0 >= t && /Перезагрузка роутера из Telegram/ {f = 1} END {exit !f}' "$EVENTS" 2>/dev/null; then
-            msg="$msg\nЭто была перезагрузка по твоей команде из Telegram."
+            body="$body\n🙋 Это была перезагрузка по твоей команде из Telegram."
         elif awk -v t="$since_t" '$0 >= t && /Перезагружаю роутер/ {f = 1} END {exit !f}' "$EVENTS" 2>/dev/null; then
-            msg="$msg\nЭто была автоперезагрузка: сеть не поднималась (подробно: vpn log)."
+            body="$body\n🤖 Это была автоперезагрузка: сеть не поднималась (подробно: журнал)."
         else
-            msg="$msg\nПохоже, пропадало питание или роутер перезагрузили вручную."
+            body="$body\n🔌 Похоже, пропадало питание или роутер перезагрузили вручную."
         fi
+        msg="$msg\n<blockquote>$body</blockquote>"
     fi
     enqueue "$msg"
     echo "$boot" > "$ST/boot_id"
@@ -400,7 +463,7 @@ if direct_ok; then
     if [ -f "$ST/inet_down" ]; then
         s=$(cat "$ST/inet_down")
         m=$(( (now - s) / 60 ))
-        [ "$m" -ge "$INET_REPORT_MIN" ] && enqueue "🌐 У провайдера не было интернета $m мин: с $(date -d "@$s" '+%H:%M') до $(date '+%H:%M'). Роутер тут ни при чём."
+        [ "$m" -ge "$INET_REPORT_MIN" ] && enqueue "🌐 <b>У провайдера пропадал интернет</b>\n<blockquote>⏱ $m мин: с $(time_tag "$s") до $(time_tag "$now")\nРоутер тут ни при чём.</blockquote>"
         rm -f "$ST/inet_down"
     fi
 else
@@ -412,10 +475,10 @@ fi
 n=$(cat /tmp/sb-watchdog/proxy_fail 2>/dev/null || echo 0)
 if [ "$n" -ge "$VPN_ALERT_MIN" ] && [ ! -f "$ST/vpn_alerted" ]; then
     echo "$((now - n * 60))" > "$ST/vpn_alerted"
-    enqueue "🔴 $(date '+%H:%M') VPN не работает уже $n мин, автоматика пока не справилась.\nРоссийские сайты открываются, зарубежные — нет. Подробно: vpn"
+    enqueue "K1|🔴 <b>VPN не работает</b>\n<blockquote>уже $n мин, с $(time_tag "$((now - n * 60))")\nРоссийские сайты открываются, зарубежные — нет.\nАвтоматика пока не справилась.</blockquote>"
 elif [ "$n" -eq 0 ] && [ -f "$ST/vpn_alerted" ] && [ "$inet" = 1 ] && [ "$up" -ge 300 ] && tunnel_ok; then
     s=$(cat "$ST/vpn_alerted")
-    enqueue "✅ $(date '+%H:%M') VPN снова работает. Не работал ~$(( (now - s) / 60 )) мин, с $(date -d "@$s" '+%H:%M')."
+    enqueue "🟢 <b>VPN снова работает</b>\n<blockquote>Не работал ~$(( (now - s) / 60 )) мин: с $(time_tag "$s") до $(time_tag "$now")</blockquote>"
     rm -f "$ST/vpn_alerted"
 fi
 
@@ -436,7 +499,9 @@ if [ -s "$EVENTS" ]; then
         # каждые пару минут, хватит одного сообщения.
         key=$(printf '%s' "$ev" | tr -d '0-9')
         if ! awk -v k="$key" -v t=$((now - 3600)) -F '\t' '$1 >= t && $2 == k {f = 1} END {exit !f}' "$ST/recent" 2>/dev/null; then
-            enqueue "$ev"
+            hhmm=$(printf '%s' "$ev" | cut -d' ' -f2)
+            txt=$(printf '%s' "$ev" | cut -d' ' -f3- | sed 's/^[^ ]*: //' | hesc)
+            enqueue "⚠️ <b>Автоматика</b> · $hhmm\n<blockquote>$txt</blockquote>"
             printf '%s\t%s\n' "$now" "$key" >> "$ST/recent"
         fi
     done

@@ -41,3 +41,18 @@ config interface 'vlesstun'
 	option proto 'none'
 	option device 'tun0'
 
+config rule 'ozon_bypass1'
+	option dest 'SERVICE_NET_1/22'
+	option lookup 'main'
+	option priority '8000'
+
+config rule 'ozon_bypass2'
+	option dest 'BANK_NET/23'
+	option lookup 'main'
+	option priority '8000'
+
+config rule 'ozon_bypass3'
+	option dest 'SERVICE_NET_2/22'
+	option lookup 'main'
+	option priority '8000'
+

@@ -29,6 +29,17 @@
    (`auto_detect_interface`), поэтому не зацикливается в собственный туннель.
 5. Программный flow offloading включён (fw4 `flow_offloading=1`, flowtable на br-lan, tun0, wan) — даёт ~1.5× скорости.
 
+**Обход sing-box для сетей Озона (с 2026-10-23).** Правила `ip rule` приоритета 8000 (`to SERVICE_NET_1/22`,
+`BANK_NET/23`, `SERVICE_NET_2/22` → таблица `main`) стоят раньше правил sing-box (9000+): трафик к этим сетям не попадает
+в `tun0`, а идёт обычным NAT через WAN. Зачем: банк в приложении не грузился (бесконечная загрузка или заглушка «плохой
+интернет»), хотя весь его трафик и так шёл «напрямую» по правилам sing-box. Банк, видимо, отличает соединения, которые sing-box
+открывает заново; обход помог (по какому признаку отличает — неизвестно). Правила постоянные: секции `config rule`
+`ozon_bypass1..3` в `/etc/config/network` (`dest`, `lookup main`, `priority 8000`); пакеты этих сетей sing-box больше не видит,
+поэтому `sb-ping route` для них показывает правило, но реальный трафик идёт мимо. Firewall: `lan→wan`, `tailscale→wan`
+разрешены, wan с masq — клиенты exit node к этим сетям тоже идут напрямую. Не «чистить» эти правила как лишние.
+Те же три сети остались в `my-direct-ip` (на случай, если правило 8000 снимут). Уточнить: сети Озона/банка могут меняться;
+домены Озона вне этих сетей по-прежнему идут через sing-box как «напрямую».
+
 Трафик самого роутера тоже идёт через tun0, **кроме tailscaled**: его пакеты помечены fwmark `0x80000` и уходят
 по ip rule 5210 в таблицу main, мимо sing-box.
 
@@ -108,7 +119,7 @@ Clash API: `127.0.0.1:9090`, секрет в `/etc/sing-box/.clash-secret` (им
 - `https-dns-proxy`: `dnsmasq_config_update='-'`, иначе при своём перезапуске он перепишет список серверов dnsmasq
   на себя одного. **Не делать `/etc/init.d/https-dns-proxy stop`**: при остановке он «восстанавливает» dnsmasq —
   убирает `127.0.0.1#5053` и добавляет `1.1.1.1`, `8.8.8.8` из `doh_backup_server` (DNS мимо sing-box). Поднимать —
-  только `start` (`restart`/`reload` у него тоже = start). Если procd его бросил, его поднимает sb-watchdog (п. 0а). Канарейки (`mask.icloud.com`, `use-application-dns.net`) заглушены в dnsmasq — iCloud Private
+  только `start` (`restart`/`reload` у него тоже = start). Если procd его бросил, его поднимает sb-watchdog (п. 0а). Канарейки (`mask.icloud.com`, `mask-h2.icloud.com`, `use-application-dns.net`) заглушены в dnsmasq — iCloud Private
   Relay и DoH Firefox не обходят роутерный DNS.
 - `route.default_domain_resolver = dns-ru` — им sing-box резолвит домены нод (у P2-нод серверы заданы доменами).
 

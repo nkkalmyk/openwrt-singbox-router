@@ -3,6 +3,8 @@
 #   router-day            — сегодня и вчера: по часам, для VPN и для интернета у провайдера
 #   router-day 7          — последние 7 дней: по строке на день
 #   --emoji               — цветные квадраты-эмодзи (для Telegram); иначе — цветные блоки в терминале или символы # + X - .
+#   --html                — то же в HTML Telegram (карточки-цитаты): router-tg day / week
+#   --png ФАЙЛ [N]        — картинка-карта аптайма за N дней (по умолчанию 31): строка — день, колонка — час; печатает подпись
 import datetime, os, re, sys
 try:
     sys.path.insert(0, "/usr/lib")
@@ -17,8 +19,14 @@ MIN_SAMPLES = 6        # меньше замеров в часе — роуте�
 DAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
 MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"]
 
-args = [a for a in sys.argv[1:] if a != "--emoji"]
-emoji = "--emoji" in sys.argv
+args = [a for a in sys.argv[1:] if a not in ("--emoji", "--html")]
+html_mode = "--html" in sys.argv
+emoji = "--emoji" in sys.argv or html_mode
+png_out = None
+if "--png" in args:                      # --png ФАЙЛ [N]
+    i = args.index("--png")
+    png_out = args[i + 1]
+    args = args[:i] + args[i + 2:]
 week = int(args[0]) if args and args[0].isdigit() else 0
 
 now = datetime.datetime.now()
@@ -134,10 +142,137 @@ def show_week(days):
         gap = f" · нет данных {nodata} ч" if nodata else ""
         print(f"{head}  {sym(worst)}  {pct} %  ~{vpn_min} мин{extra}{gap}")
 
+def show_day_html(day):
+    n, vpn_min, inet_min, nodata = day_stats(day)
+    kinds = [tg_kind(day, hh) for hh in range(day_hours(day))]
+    rows = [f"<code>{a:02d}</code>  " + "".join(sym(k) for k in kinds[a:a + 8]) for a in (0, 8, 16) if kinds[a:a + 8]]
+    print(f"📅 <b>{title(day)}</b>")
+    print("<blockquote>" + "\n".join(rows) + "</blockquote>")
+    print("🛡 VPN: " + (f"~{vpn_min} мин сбоев" if vpn_min else "без сбоев") + " · 🌐 провайдер: " +
+          (f"~{inet_min} мин без интернета" if inet_min else "без сбоев"))
+    legend = [LEGEND[k] for k in LEGEND if k in kinds]
+    if legend:
+        print("<i>" + " · ".join(legend) + "</i>")
+
+def show_week_html(days):
+    first = min(d for d, _ in data)
+    lines = []
+    for k in range(days - 1, -1, -1):
+        day = now.date() - datetime.timedelta(days=k)
+        if day < first:
+            continue
+        n, vpn_min, inet_min, nodata = day_stats(day)
+        head = f"<b>{DAYS[day.weekday()]} {day:%d.%m}</b>"
+        if not n:
+            lines.append(f"{sym('nodata')} {head} · нет данных")
+            continue
+        kinds = [hour_kinds(day, hh)[0] for hh in range(day_hours(day))]
+        worst = "bad" if "bad" in kinds else "minor" if "minor" in kinds else "ok"
+        pct = f"{100 - vpn_min / 5 * 100 / n:.1f}".replace(".", ",")
+        extra = (f" · ~{vpn_min} мин" if vpn_min else "") + (f" · сеть ~{inet_min} мин" if inet_min else "") + (f" · нет данных {nodata} ч" if nodata else "")
+        lines.append(f"{sym(worst)} {head} · {pct}%{extra}")
+    print(f"🗓 <b>Последние {days} дней</b>")
+    print("<blockquote>" + "\n".join(lines) + "</blockquote>")
+
+# ---------- картинка: карта аптайма (PNG без библиотек: только zlib) ----------
+FONT = {"0": "111101101101111", "1": "010110010010111", "2": "111001111100111", "3": "111001111001111",
+        "4": "101101111001001", "5": "111100111001111", "6": "111100111101111", "7": "111001001010010",
+        "8": "111101111101111", "9": "111101111001111"}
+PAL = {"ok": (46, 160, 67), "minor": (227, 170, 48), "bad": (226, 66, 66), "net": (66, 133, 244),
+       "nodata": (58, 64, 74), "future": (30, 35, 43)}
+BG, LABEL, LABEL_WE = (22, 26, 33), (140, 148, 160), (205, 210, 220)
+
+def make_png(path, days_list):
+    import struct, zlib
+    S, CELL, GAP, M, R = 3, 26, 4, 18, 6
+    PITCH = CELL + GAP
+    GUT = 2 * (3 * S + S) + 12
+    TOP = 5 * S + 18
+    # высота с учётом лишнего зазора на смене месяца
+    ys, y, prev = [], M + TOP, None
+    for d in days_list:
+        if prev is not None and d.month != prev:
+            y += 8
+        ys.append(y)
+        y += PITCH
+        prev = d.month
+    W, H = M + GUT + 24 * PITCH - GAP + M, y - GAP + M
+    rows = [bytearray(bytes(BG) * W) for _ in range(H)]
+
+    def rect(x, y, w, h, color, r=0):
+        c = bytes(color)
+        for yy in range(h):
+            inset = 0
+            if r:
+                dy = min(yy, h - 1 - yy)
+                if dy < r:
+                    inset = r - int((r * r - (r - dy - 0.5) ** 2) ** 0.5 + 0.5)
+            rows[y + yy][(x + inset) * 3:(x + w - inset) * 3] = c * (w - 2 * inset)
+
+    def text(x, y, s, color):
+        for ch in s:
+            g = FONT[ch]
+            for i, bit in enumerate(g):
+                if bit == "1":
+                    rect(x + (i % 3) * S, y + (i // 3) * S, S, S, color)
+            x += 4 * S
+
+    for hh in (0, 6, 12, 18):
+        text(M + GUT + hh * PITCH, M, str(hh), LABEL)
+    for d, y0 in zip(days_list, ys):
+        s = f"{d.day:02d}"
+        text(M, y0 + (CELL - 5 * S) // 2, s, LABEL_WE if d.weekday() >= 5 else LABEL)
+        for hh in range(24):
+            if d == now.date() and hh >= now.hour:
+                kind = "future"
+            else:
+                kind = tg_kind(d, hh)
+            rect(M + GUT + hh * PITCH, y0, CELL, CELL, PAL[kind], R)
+    raw = b"".join(b"\x00" + bytes(r) for r in rows)
+    chunk = lambda t, b: struct.pack(">I", len(b)) + t + b + struct.pack(">I", zlib.crc32(t + b) & 0xFFFFFFFF)
+    blob = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
+    with open(path + ".tmp", "wb") as f:
+        f.write(blob)
+    os.replace(path + ".tmp", path)
+
+def show_png(path, days):
+    if not data:
+        print("Данных пока нет.")
+        sys.exit(1)
+    first = min(d for d, _ in data)
+    start = max(first, now.date() - datetime.timedelta(days=days - 1))
+    days_list = [start + datetime.timedelta(days=k) for k in range((now.date() - start).days + 1)]
+    make_png(path, days_list)
+    cnt = {"ok": 0, "minor": 0, "bad": 0, "net": 0, "nodata": 0}
+    vpn_total = inet_total = 0
+    for d in days_list:
+        for hh in range(day_hours(d)):
+            cnt[tg_kind(d, hh)] += 1
+        _, v, i, _ = day_stats(d)
+        vpn_total += v
+        inet_total += i
+    seen = sum(cnt.values()) - cnt["nodata"]
+    ok_pct = f"{cnt['ok'] * 100 / seen:.1f}".replace(".", ",") if seen else "—"
+    print(f"🗺 <b>Карта аптайма</b> · {len(days_list)} дн., с {days_list[0]:%d.%m}")
+    print("<i>строка — день, колонка — час (0–23, время МСК)</i>")
+    print()
+    print("<blockquote>🟩 всё хорошо · 🟨 мелкий сбой · 🟥 сбой VPN\n🟦 нет интернета у провайдера · ⬛ нет данных</blockquote>")
+    print(f"✅ Часов без сбоев: <b>{ok_pct}%</b> ({cnt['ok']} из {seen})")
+    print(f"🛡 VPN не работал: ~{vpn_total} мин · 🌐 провайдер: ~{inet_total} мин без интернета")
+
 if not data:
     print("Данных пока нет: почасовая сводка начнёт копиться в :58 ближайшего часа (uptime-hourly).")
+elif png_out:
+    show_png(png_out, min(week or 31, 31))
+elif week and html_mode:
+    show_week_html(min(week, 31))
 elif week:
     show_week(min(week, 31))
+elif html_mode:
+    show_day_html(now.date() - datetime.timedelta(days=1))
+    print()
+    show_day_html(now.date())
 else:
     show_day(now.date() - datetime.timedelta(days=1))
     print()

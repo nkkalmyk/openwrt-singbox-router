@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-# Ответы Telegram-бота: те же данные, что в `vpn …`, но для узкого экрана телефона (HTML Telegram):
-# короткие строки, значки вместо OK/НЕТ, без таблиц и «=====». Берёт вывод обычных команд (без цвета) и переписывает его.
-#   router-tg status [short] | nodes | gemini | log | report | site <сайт> | auto | update | speed
+# Ответы Telegram-бота: те же данные, что в `vpn …`, но для экрана телефона (HTML Telegram): карточки-цитаты,
+# шкалы, флаги стран, короткие строки. Берёт вывод обычных команд (без цвета) и переписывает его.
+#   router-tg status [short] | nodes | gemini | log | report | day | week | month | site <сайт> | auto | update | speed | help
+# `month` рисует картинку /tmp/uptime-map.png и печатает подпись к ней.
 # Не удалось разобрать (формат команды поменялся) — отдаёт исходный вывод как есть, чтобы ничего не потерялось.
-import html, os, re, subprocess, sys
+import html, os, re, subprocess, sys, time
 try:
     sys.path.insert(0, "/usr/lib")
     sys.dont_write_bytecode = True
@@ -12,34 +13,84 @@ except ImportError:   # модуля нет — события без цветн
     event_kind = lambda line: None
 
 LIMIT = 3900            # лимит Telegram — 4096 символов
+DAYBIN = os.environ.get("RTG_DAY", "/usr/bin/router-day")   # для проверки новой версии до установки
 esc = html.escape
+DAYS_SHORT = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"]
 
 def run(cmd, timeout=40):
     env = dict(os.environ, NO_COLOR="1", VPN_COLOR="0")
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
     return (r.stdout + r.stderr).strip("\n")
 
+# ---------- мелкие кирпичики оформления ----------
 def flag(code):
     return "".join(chr(0x1F1E6 + ord(c) - 65) for c in code.upper()) if re.fullmatch(r"[A-Za-z]{2}", code) else ""
+
+COUNTRY: dict = {}   # в публичной копии словарь стран убран: заполни «название страны по-русски → код ISO»
+
+def node(name):
+    """«P1 Город, Страна» → «<флаг> Город · P1»; «P2 Страна» → «<флаг> Страна · P2»; не разобрали — имя как есть."""
+    name = name.strip()
+    m = re.match(r"^(P1|P2)\s+(.+)$", name)
+    prov, rest = (m[1], m[2]) if m else ("", name)
+    city, _, country = rest.rpartition(",")
+    city, country = (city.strip(), country.strip()) if city else (rest.strip(), rest.strip())
+    fl = flag(COUNTRY.get(country, ""))
+    label = (fl + " " if fl else "") + esc(city)
+    return label + (f" · {prov}" if prov else "")
+
+def bar(frac, n=10):
+    k = max(0, min(n, round(frac * n)))
+    return "▰" * k + "▱" * (n - k)
+
+def now_line():
+    t = time.localtime()
+    return f"{DAYS_SHORT[t.tm_wday]} {t.tm_mday} {MONTHS[t.tm_mon - 1][:3]} · {t.tm_hour:02d}:{t.tm_min:02d}"
+
+def quote(lines, expandable=False):
+    return f"<blockquote{' expandable' if expandable else ''}>" + "\n".join(lines) + "</blockquote>"
+
+def meminfo():
+    d = {}
+    for l in open("/proc/meminfo"):
+        k, _, v = l.partition(":")
+        d[k] = int(v.split()[0]) // 1024
+    return d["MemTotal"], d["MemAvailable"]
+
+def mem_dot(free):
+    return "🟢" if free >= 50 else "🟡" if free >= 35 else "🔴"
 
 # ---------- события автоматики: «2026-10-04 19:21:01 sb-watchdog: VPN снова работает» ----------
 EVENT = re.compile(r"(\d{4})-(\d\d)-(\d\d) (\d\d:\d\d):\d\d \S+?: (.*)")
 DOT = {"bad": "🔴", "ok": "🟢", "warn": "🟡", None: "▫️"}
+APPLY_OK = "apply-vless.sh завершился с кодом 0"
 
 def events(text, group):
-    out, day = [], None
+    """group=True — по дням, каждый день своей цитатой; False — одна строка на событие (для сводки)."""
+    rows = []                                    # (дата, время, значок, текст)
     for l in text.splitlines():
         m = EVENT.match(l)
         if not m:
             continue
-        d = f"{m[3]}.{m[2]}"
-        if group:
-            if d != day:
-                out.append(f"<b>{d}</b>")
-                day = d
-            out.append(f"{DOT[event_kind(l)]} {m[4]} · {esc(m[5])}")
-        else:
-            out.append(f"{DOT[event_kind(l)]} {d} {m[4]} · {esc(m[5])}")
+        if m[5].strip() == APPLY_OK:             # «подписки обновлены» — не отдельной строкой, а галочкой к прошлой
+            if rows:
+                rows[-1][3] += " ✓"
+            continue
+        rows.append([(int(m[1]), int(m[2]), int(m[3])), m[4], DOT[event_kind(l)], esc(m[5])])
+    if not group:
+        return [f"{r[2]} <b>{r[1]}</b> · {r[3]}" for r in rows]
+    out, cur, lines = [], None, []
+    for d, hhmm, dot, txt in rows:
+        if d != cur:
+            if lines:
+                out.append(quote(lines))
+            cur, lines = d, []
+            wd = time.strptime(f"{d[0]}-{d[1]}-{d[2]}", "%Y-%m-%d").tm_wday
+            out.append(f"<b>{d[2]} {MONTHS[d[1] - 1]}</b> · {DAYS_SHORT[wd]}")
+        lines.append(f"{dot} <b>{hhmm}</b> · {txt}")
+    if lines:
+        out.append(quote(lines))
     return out
 
 # ---------- состояние ----------
@@ -53,41 +104,45 @@ def status(short=False):
             kv[last] = m[2]
         elif l.strip().startswith("(") and last:
             notes[last] = l.strip()
-    lines, flags = [], {"bad": False, "warn": False}
+    rows, flags = [], {"bad": False, "warn": False}
 
-    def mark(good, text):
+    def mark(good, name, detail):
         if not good:
             flags["bad"] = True
-        lines.append(("✅ " if good else "❌ ") + text)
+        rows.append(("✅" if good else "❌") + f" <b>{name}</b> · {detail}")
 
     inet = kv["Интернет провайдера"]
-    mark(inet == "OK", "Интернет у провайдера" + ("" if inet == "OK" else " — нет"))
+    mark(inet == "OK", "Интернет", "провайдер на связи" if inet == "OK" else "у провайдера нет интернета")
     m = re.match(r"OK — выход в (\w+) через (.+)", kv["VPN"])
-    mark(bool(m), f"VPN — {flag(m[1])} {esc(m[2])}" if m else "VPN не работает")
+    mark(bool(m), "VPN", node(m[2]) if m else "не работает")
     if "VPN" in notes:
         flags["warn"] = True
-        lines.append("⚠️ Нода выбрана вручную. Вернуть: «⚙️ Ещё» → «🎯 Автовыбор»")
+        rows.append("⚠️ <i>Нода выбрана вручную. Вернуть: «⚙️ Ещё» → «🎯 Автовыбор»</i>")
     m = re.match(r"через (.+?)( \(выбрана вручную.*)?$", kv["Gemini"])
-    lines.append(f"✨ Gemini — {esc(m[1])}" + (" ⚠️ выбрана вручную" if m[2] else ""))
+    rows.append(f"✨ <b>Gemini</b> · {node(m[1])}" + (" ⚠️ <i>вручную</i>" if m[2] else ""))
     flags["warn"] |= bool(m[2])
-    mark(kv["Маршрутизация"] == "OK", "Маршрутизация")
-    m = re.match(r"работает (.+?), память (\d+) MB", kv["sing-box"])
-    mark(bool(m), f"sing-box: {m[1]}, {m[2]} MB" if m else "sing-box не запущен — сторож поднимет за минуту")
+    mark(kv["Маршрутизация"] == "OK", "Маршрутизация", "в порядке" if kv["Маршрутизация"] == "OK" else "сбой")
     ts = kv["Tailscale"]
-    mark(ts == "Running", "Tailscale" + ("" if ts == "Running" else f": {esc(ts)}"))
-    lines.append(f"💾 Свободно памяти: {esc(kv['Свободная память'])}")
+    mark(ts == "Running", "Tailscale", "на связи" if ts == "Running" else esc(ts))
+    m = re.match(r"работает (.+?), память (\d+) MB", kv["sing-box"])
+    mark(bool(m), "sing-box", f"работает {m[1]} · {m[2]} МБ" if m else "не запущен — сторож поднимет за минуту")
+    total, free = meminfo()
+    mem = [f"{mem_dot(free)} <b>Память</b> · свободно {free} из {total} МБ", f"<code>{bar(1 - free / total, 14)}</code> занято {100 - free * 100 // total}%"]
     title = ("🔴 <b>Есть проблема</b>" if flags["bad"] else "🟡 <b>Работает, есть замечание</b>" if flags["warn"]
              else "🟢 <b>Всё работает</b>")
-    out = [title] + lines
+    out = [title, f"<i>{now_line()}</i>", "", quote(rows), "", quote(mem)]
     if not short:
         ev = events(tail, group=False)
         if ev:
-            out += ["", "<b>Последнее</b>"] + ev
+            out += ["", "<b>Последнее</b>", quote(ev, expandable=True)]
     return "\n".join(out)
 
 # ---------- ноды ----------
 def delay_dot(ms):
-    return "🟢" if ms < 150 else "🟡" if ms < 300 else "🔴"
+    return "🟢" if ms < 200 else "🟡" if ms < 350 else "🔴"
+
+def delay_bar(ms):
+    return bar((5 if ms < 150 else 4 if ms < 250 else 3 if ms < 350 else 2 if ms < 450 else 1) / 5, 5)
 
 def parse_nodes(text):
     alive, dead, hdr, gem, stamp = [], [], {}, None, ""
@@ -114,12 +169,14 @@ def parse_nodes(text):
     return alive, dead, hdr, gem, stamp
 
 def node_lines(alive, dead, used, top):
-    out = [f"{delay_dot(ms)} {ms} мс · {esc(name)}" + (" ◀ сейчас" if name == used else "") for ms, name in alive[:top]]
+    out = [f"{delay_dot(ms)} {node(name)} <code>{ms:>4} мс {delay_bar(ms)}</code>" + (" ◀" if name == used else "")
+           for ms, name in alive[:top]]
     if len(alive) > top:
-        out.append(f"…и ещё {len(alive) - top} живых (до {alive[-1][0]} мс)")
+        out.append(f"<i>…и ещё {len(alive) - top} живых, до {alive[-1][0]} мс</i>")
+    tail = []
     if dead:
-        out.append(f"⚫ Не отвечают ({len(dead)}): " + esc(", ".join(dead[:6])) + ("…" if len(dead) > 6 else ""))
-    return out
+        tail = [f"⚫ <i>Не отвечают ({len(dead)}):</i> " + ", ".join(node(d) for d in dead[:6]) + ("…" if len(dead) > 6 else "")]
+    return out, tail
 
 def nodes():
     alive, dead, hdr, gem, stamp = parse_nodes(run(["/usr/bin/sb-ping"]))
@@ -127,23 +184,25 @@ def nodes():
         raise ValueError("нод не нашлось")      # формат поменялся — покажется исходный вывод
     manual = hdr.get("proxy", "auto") != "auto"
     used = hdr["proxy"] if manual else hdr.get("auto", "")
-    out = [f"🌐 <b>Ноды</b>" + (f" · опрос {stamp}" if stamp else ""),
-           f"Сейчас: <b>{esc(used)}</b>" + (" (выбрана вручную)" if manual else " (автовыбор)")]
+    now = [f"📍 <b>Сейчас</b> · {node(used)} <i>({'вручную' if manual else 'автовыбор'})</i>"]
     if hdr.get("gemini-auto"):
         g = hdr.get("gemini-select", "gemini-auto")
-        out.append(f"Gemini: {esc(hdr['gemini-auto'])}" + ("" if g == "gemini-auto" else f" ⚠️ вручную: {esc(g)}"))
-    return "\n".join(out + [""] + node_lines(alive, dead, used, 10))
+        now.append(f"✨ <b>Gemini</b> · {node(hdr['gemini-auto'])}" + ("" if g == "gemini-auto" else f" ⚠️ <i>вручную: {node(g)}</i>"))
+    lines, tail = node_lines(alive, dead, used, 10)
+    out = ["🌐 <b>Ноды</b>" + (f" · <i>опрос {stamp}</i>" if stamp else ""), "", quote(now), "", "<b>Самые быстрые</b>", quote(lines)]
+    return "\n".join(out + tail)
 
 def gemini():
     alive, dead, hdr, gem, stamp = parse_nodes(run(["/usr/bin/vpn", "gemini"]))
     auto, name = gem
-    out = ["✨ <b>Ноды для Gemini</b>", f"Сейчас: <b>{esc(name)}</b>" + (" (автовыбор)" if auto else " ⚠️ выбрана вручную")]
-    return "\n".join(out + [""] + node_lines(alive, dead, name, 8))
+    now = [f"✨ <b>Сейчас</b> · {node(name)} <i>({'автовыбор' if auto else 'вручную ⚠️'})</i>"]
+    lines, tail = node_lines(alive, dead, name, 8)
+    return "\n".join(["✨ <b>Ноды для Gemini</b>", "<i>только P1: через P2 Gemini не работает</i>", "", quote(now), "", quote(lines)] + tail)
 
 # ---------- журнал ----------
 def log():
     ev = events(run(["/usr/bin/sb-ping", "events", "15"]), group=True)
-    return "\n".join(["📜 <b>Журнал автоматики</b>"] + (ev or ["Событий пока нет — автоматике не приходилось вмешиваться."]))
+    return "\n".join(["📜 <b>Журнал автоматики</b>", ""] + (ev or ["Событий пока нет — автоматике не приходилось вмешиваться."]))
 
 # ---------- отчёт ----------
 def report():
@@ -175,56 +234,87 @@ def report():
     head = ("🟢 <b>Всё хорошо</b>" if verdict.startswith("всё хорошо") else
             "🔴 <b>Проблема сейчас</b>" if verdict.startswith("ПРОБЛЕМА") else
             f"🟡 <b>Сейчас всё работает</b>, но за {hours} ч были сбои — автоматика справилась")
-    out = [f"📋 <b>Отчёт за {hours} ч</b>", head, "", "<b>Сейчас</b>",
-           f"{ok('интернет провайдера')} интернет · {ok('VPN')} VPN · {ok('маршрутизация')} маршрутизация · {ok('Tailscale')} Tailscale",
-           f"Ноды: {esc(now.get('ноды живы', '?'))}",
-           f"sing-box: {esc(now.get('sing-box', '?'))}",
-           f"Свободно памяти: {esc(now.get('свободная память', '?'))} · /overlay {esc(now.get('/overlay занят', '?'))}", "",
-           f"<b>За {hours} ч</b>"]
-    for k in ("VPN не отвечал", "провайдер не отвечал", "память sing-box", "свободная память", "событий автоматики"):
-        if k in past:
-            out.append(f"• {k}: {esc(past[k])}")
-    out += [f"   {e}" for e in evs[:6]]
+    nodes_ = re.sub(r"(\w+) (\d+) из (\d+)", r"\1 \2/\3", now.get("ноды живы", "?")).replace(", ", " · ")
+    cur = [f"{ok('интернет провайдера')} интернет · {ok('VPN')} VPN · {ok('Tailscale')} Tailscale",
+           f"{ok('маршрутизация')} маршрутизация",
+           f"🛰 Ноды: {esc(nodes_)}",
+           f"⏱ sing-box: {esc(now.get('sing-box', '?'))}",
+           f"🧠 Свободно {esc(now.get('свободная память', '?'))} · /overlay {esc(now.get('/overlay занят', '?'))}"]
+    def count(k, what):
+        v = past.get(k, "?")
+        return f"{what}: без сбоев" if v.startswith("0 ") else f"{what}: " + esc(re.sub(r": (.+)$", r" (\1)", v))
+    per = [count("VPN не отвечал", "🛡 VPN"), count("провайдер не отвечал", "🌐 Провайдер"),
+           f"🧠 sing-box {esc(past.get('память sing-box', '?'))} · свободно {esc(past.get('свободная память', '?'))}",
+           "⚙️ Автоматика: " + esc(re.sub(r"(\d+), перезапусков sing-box (\d+)", r"событий \1 · перезапусков sing-box \2", past.get("событий автоматики", "?")))]
+    out = [f"📋 <b>Отчёт за {hours} ч</b>", head, "", "<b>Сейчас</b>", quote(cur), "", f"<b>За {hours} ч</b>", quote(per)]
+    if evs:
+        out += [quote(evs[:6], expandable=True)]
     bad = [(s, t) for s, t in items if s in "!~"]
     if bad:
-        out += ["", "<b>Подробности</b>"] + [("🔴 " if s == "!" else "🟡 ") + esc(t) for s, t in bad][:8]
+        out += ["", "<b>Подробности</b>", quote([("🔴 " if s == "!" else "🟡 ") + esc(t) for s, t in bad][:8])]
     return "\n".join(out)
+
+# ---------- сутки, неделя, карта месяца: считает router-day ----------
+def day():
+    d = run([DAYBIN, "--html"])
+    w = run([DAYBIN, "7", "--html"])
+    return d + "\n\n" + w
+
+def week():
+    return run([DAYBIN, "7", "--html"])
+
+def month():
+    return run([DAYBIN, "--png", "/tmp/uptime-map.png", "31"])
 
 # ---------- куда идёт сайт ----------
 RULES = [("domain_suffix=[ru su", "российский домен (.ru, .su, .рф)"), ("geoip-ru", "российский IP-адрес"),
-         ("geosite-category-ru", "российский сервис"), ("final", "всё остальное идёт через VPN")]
+         ("geosite-category-ru", "российский сервис"), ("my-direct", "в твоём списке «напрямую»"),
+         ("my-proxy", "в твоём списке «через VPN»"), ("gemini", "Gemini идёт через P1"), ("final", "всё остальное идёт через VPN")]
 
 def site(host):
-    out = ["🔎 <b>Куда идёт сайт</b>"]
+    out = [f"🔎 <b>{esc(host)}</b>"]
     for l in run(["/usr/bin/vpn", "site", host], timeout=60).splitlines():
         m = re.match(r"^(\S+)\s+(НАПРЯМУЮ|VPN: .+?)\s{2,}(.*)$", l)
         if not m:
-            out.append(f"{esc(l.split()[0]) if l.split() else host} — не удалось определить (соединение не поймано)")
+            out.append(quote([f"❔ <b>{esc(l.split()[0]) if l.split() else esc(host)}</b> · соединение не поймано — открой сайт и повтори"]))
             continue
         why = next((t for k, t in RULES if k in m[3]), esc(m[3]))
         if m[2] == "НАПРЯМУЮ":
-            out.append(f"🇷🇺 <b>{esc(m[1])}</b> — напрямую\n      <i>{why}</i>")
+            out.append(quote([f"🇷🇺 <b>{esc(m[1])}</b> · напрямую", f"<i>{why}</i>"]))
         else:
-            out.append(f"🌍 <b>{esc(m[1])}</b> — через VPN\n      {esc(m[2][5:])}\n      <i>{why}</i>")
+            out.append(quote([f"🌍 <b>{esc(m[1])}</b> · через VPN", node(m[2][5:]), f"<i>{why}</i>"]))
     return "\n".join(out)
+
+# ---------- справка ----------
+def help_():
+    return "\n".join([
+        "👋 <b>Роутер на связи</b>",
+        "Пишу сюда, только если что-то сломалось или починилось. Кнопки внизу и под сообщениями — самое частое.",
+        "", "<b>Смотреть</b>",
+        quote(["/status · состояние", "/nodes · ноды и задержки", "/gemini · ноды для Gemini", "/day · сутки и неделя",
+               "/month · карта аптайма за месяц", "/report · отчёт за 12 часов", "/log · журнал автоматики",
+               "/site ozon.ru · куда идёт сайт"]),
+        "<b>Действия</b>",
+        quote(["/auto · автовыбор ноды", "/update · обновить ноды", "/speed · замер скорости", "/more · всё это кнопками",
+               "/restart · перезапуск sing-box", "/reboot · перезагрузка роутера"])])
 
 # ---------- действия ----------
 def auto():
     t = run(["/usr/bin/vpn", "auto"])
-    return "🎯 Автовыбор ноды включён." if t.endswith("→ auto") else esc(t)
+    return "🎯 <b>Автовыбор ноды включён.</b>" if t.endswith("→ auto") else esc(t)
 
 def update():
     t = run(["/usr/bin/vpn", "update"], timeout=320)
     n = re.search(r"(?:Всего нод|Нод): (\d+)", t)
-    cnt = f" Нод: {n[1]}." if n else ""
+    cnt = f"\nНод: <b>{n[1]}</b>" if n else ""
     if "Нет интернета у провайдера" in t:
-        return "❌ Нет интернета у провайдера, ничего не менял."
+        return "❌ <b>Нет интернета у провайдера</b>\nНичего не менял."
     if "Применено, связь есть" in t:
-        return f"✅ Ноды изменились — применено, VPN работает.{cnt}"
+        return f"✅ <b>Ноды изменились — применено</b>\nVPN работает.{cnt}"
     if "Ноды не изменились" in t:
-        return f"✅ Подписки проверены: ноды не изменились, перезапуск не нужен.{cnt}"
+        return f"✅ <b>Подписки проверены</b>\nНоды не изменились, перезапуск не нужен.{cnt}"
     if "НЕВАЛИДНЫЙ" in t or "Обновление не выполнено" in t:
-        return "❌ Обновление не применилось, конфиг не тронут (подробности: /log)."
+        return "❌ <b>Обновление не применилось</b>\nКонфиг не тронут. Подробности: /log"
     return "<pre>" + esc("\n".join(t.splitlines()[-8:])) + "</pre>"
 
 def speed():
@@ -236,15 +326,18 @@ def speed():
     f = lambda k: [v for v, _ in rows[k]]
     avg = lambda a: sum(a) / len(a)
     cpu = max(c for r in rows.values() for _, c in r)
-    return "\n".join(["⚡ <b>Скорость</b> (с самого роутера)", "",
-        "<b>Через VPN</b>", f"⬇ {avg(f('VPN, приём')):.0f} Мбит/с" + (f" (3 замера: {' / '.join(f'{v:.0f}' for v in f('VPN, приём'))})" if len(rows['VPN, приём']) > 1 else ""),
-        f"⬆ {avg(f('VPN, отдача')):.0f} Мбит/с", "",
-        "<b>Напрямую</b>", f"⬇ {' / '.join(f'{v:.0f}' for v in f('напрямую, приём'))} Мбит/с",
-        f"⬆ {avg(f('напрямую, отдача')):.0f} Мбит/с", "", f"Нагрузка процессора до {cpu} %"])
+    line = lambda arrow, v: f"{arrow} <code>{bar(min(v, 100) / 100, 12)}</code> <b>{v:.0f}</b> Мбит/с"
+    vpn_in = f("VPN, приём")
+    return "\n".join(["⚡ <b>Скорость</b> · <i>с самого роутера, тариф 100 Мбит</i>", "",
+        "<b>Через VPN</b>", quote([line("⬇", avg(vpn_in)) + (f" <i>({' / '.join(f'{v:.0f}' for v in vpn_in)})</i>" if len(vpn_in) > 1 else ""),
+                                   line("⬆", avg(f("VPN, отдача")))]), "",
+        "<b>Напрямую</b>", quote([line("⬇", avg(f("напрямую, приём"))), line("⬆", avg(f("напрямую, отдача")))]), "",
+        f"🧮 Нагрузка процессора до {cpu}%"])
 
 COMMANDS = {"status": lambda a: status(a == "short"), "nodes": lambda a: nodes(), "gemini": lambda a: gemini(),
             "log": lambda a: log(), "report": lambda a: report(), "site": lambda a: site(a), "auto": lambda a: auto(),
-            "update": lambda a: update(), "speed": lambda a: speed()}
+            "update": lambda a: update(), "speed": lambda a: speed(), "day": lambda a: day(), "week": lambda a: week(),
+            "month": lambda a: month(), "help": lambda a: help_()}
 
 if __name__ == "__main__":
     cmd, arg = (sys.argv[1] if len(sys.argv) > 1 else ""), (sys.argv[2] if len(sys.argv) > 2 else "")
@@ -255,9 +348,15 @@ if __name__ == "__main__":
     except Exception:   # формат вывода изменился или команда не отработала — показать как есть
         raw = {"status": ["/usr/bin/vpn", "status"], "nodes": ["/usr/bin/sb-ping"], "gemini": ["/usr/bin/vpn", "gemini"],
                "log": ["/usr/bin/sb-ping", "events", "15"], "report": ["/usr/bin/router-report", "12"],
-               "site": ["/usr/bin/vpn", "site", arg], "auto": ["/usr/bin/vpn", "auto"]}.get(cmd)
+               "site": ["/usr/bin/vpn", "site", arg], "auto": ["/usr/bin/vpn", "auto"],
+               "day": ["/usr/bin/router-day", "--emoji"], "week": ["/usr/bin/router-day", "7", "--emoji"]}.get(cmd)
         try:
             text = "<pre>" + esc(run(raw)) + "</pre>" if raw else "Не получилось, подробности: /log"
         except Exception:
             text = "Не получилось, подробности: /log"
-    print(text if len(text) <= LIMIT else text[:LIMIT].rsplit("\n", 1)[0] + "\n…")
+    if len(text) > LIMIT:                    # обрезали — закрыть открытые цитаты, иначе Telegram не примет разметку
+        text = text[:LIMIT].rsplit("\n", 1)[0] + "\n…"
+        for tag in ("blockquote", "pre"):
+            if text.count(f"<{tag}") > text.count(f"</{tag}>"):
+                text += f"</{tag}>"
+    print(text)
